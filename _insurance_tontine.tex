@@ -1,0 +1,45 @@
+%!TEX program = lualatex
+\documentclass[9pt, oneside]{memoir}
+\setlrmarginsandblock{0.5in}{6in}{*}
+\setulmarginsandblock{0.5in}{0.5in}{*}
+\usepackage[none]{hyphenat}
+\usepackage[colorlinks=true]{hyperref}
+
+\setlength{\sidebarhsep}{0.5in}
+\setlength{\sidebarwidth}{4.5in}
+\setsidebarheight{\textheight}
+
+\checkandfixthelayout
+\setlength{\parindent}{0pt}
+\nonzeroparskip
+
+\renewcommand{\sidebarfont}{
+    \scriptnotesize
+    \nonzeroparskip}
+
+\setcounter{secnumdepth}{0}
+\setsubsubsecheadstyle{\normalsize\itshape}
+\setsubsecheadstyle{\normalsize\bfseries}
+
+\newcommand{\ruledsec}[1]{
+    \Large\bfseries #1 \par\vskip-2mm
+    \rule{1in}{0.1mm}
+    \par\vskip-2mm}
+\setsecheadstyle{\ruledsec}
+
+\newcommand{\position}[2]{\subsubsection{#1
+    \hfill
+    #2}}
+
+\usepackage{fontspec}
+\setmainfont{Carlito}
+\usepackage[scaled=.5]{helvet}
+\usepackage{courier}
+\setSingleSpace{0.9}
+\SingleSpacing
+
+\pagestyle{empty}
+
+\begin{document}
+
+\end{document}
