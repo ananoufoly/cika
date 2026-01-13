@@ -599,10 +599,10 @@ def main():
     print("CLCS Interactive Design Solver (v2 - strict cashrun)\n")
     while True:
         print("Choose a workflow:")
-        print(" 1) Maximize gamma (forward design)")
-        print(" 2) Feasible (N, cycles) given gamma & delta")
-        print(" 3) Feasible (N, cycles) + compute c from monetary target")
-        print(" 0) Exit")
+        print(" 1. Maximize gamma (forward design)")
+        print(" 2. Feasible (N, cycles) given gamma & delta")
+        print(" 3. Feasible (N, cycles) + compute c from monetary target")
+        print(" 0. Exit")
         choice = _prompt("Enter choice: ")
 
         if choice == "1":
