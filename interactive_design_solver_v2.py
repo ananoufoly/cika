@@ -1,5 +1,4 @@
-"""interactive_design_solver_v2.py
-Interactive design solver for CLCS with STRICT CASHRUN and (optional) REPLACEMENT.
+"""Interactive design solver for CLCS with STRICT CASHRUN and (optional) REPLACEMENT.
 
 This solver searches feasible CLCS designs under a safety constraint using Monte Carlo.
 
