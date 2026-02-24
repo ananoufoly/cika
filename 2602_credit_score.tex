@@ -1,0 +1,262 @@
+% !TEX program = lualatex
+\documentclass[11t]{article}
+
+\usepackage{microtype}
+\usepackage{geometry}
+%\geometry{margin=1in}
+\usepackage{setspace}
+\usepackage{hyperref}
+\usepackage[style=apa, backend=biber, natbib=true]{biblatex}
+\addbibresource{references.bib}
+
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+
+\usepackage{fontspec}
+\setmainfont{Carlito}
+
+\usepackage[scaled=.95]{helvet}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.7em}
+\onehalfspacing
+
+\newcommand{\MVS}{\mathrm{MVS}^{\ast}}
+\newcommand{\sigmoid}{\operatorname{sigmoid}}
+\newcommand{\logonep}{\operatorname{log1p}}
+\newcommand{\Indic}{\mathbb{I}}
+
+\title{\textbf{TECHNICAL NOTE: The MVS Framework}\\
+Underwriting External Credit via Digitized ROSCA Behaviour}
+\author{}
+\date{16 February 2026}
+\begin{document}
+\maketitle
+
+\textbf{Subject:} Operationalizing ROSCA Behaviour for Initial Credit Scoring and PD Calibration
+
+\vspace{0.5em}
+\hrule
+\vspace{0.8em}
+
+\section{The narrative: the information problem and why ROSCAs matter}
+
+The central constraint to extending credit in financially thin environments is information asymmetry. When bureau histories are incomplete or absent, lenders cannot directly observe repayment type. 
+Rotating Savings and Credit Associations (ROSCAs)—tontines, osusus—matter because they partially solve this information problem through repeated interaction, peer observability, and embedded discipline.
+The theoretical foundation is clear: ROSCAs can be understood as repeated-game institutions with endogenous enforcement \citet{BesleyCoateLoury1993}. Empirically, ROSCAs often function as commitment devices that help members maintain disciplined periodic payments \citet{Gugerty2007}. 
+Governance quality, sanctions, and social connectedness shape enforcement and sustainability over time \citet{McNabbLeMayBoucherBonan2019}. In bidding ROSCAs, the bid discount behaves like an implicit interest rate and reveals liquidity stress and shocks \citet{Klonner2003,CalomirisRajaraman1998}.
+A key bridge to formal underwriting is the insight that \emph{publicly observable characteristics} inside these informal institutions can predict creditworthiness. 
+\citet{SchreinerNagarajan2000} provide direct evidence from Gambian ASCRAs/ROSCAs that cheap, observable reliability markers contain predictive signal for credit screening. 
+This is precisely the operational premise of MVS: turn socially embedded observables into an interpretable underwriting signal at launch, then calibrate it into a formal probability of default once outcomes accumulate.
+
+\section{Literature-grounded mechanisms: what we are measuring}
+
+The score is intentionally mechanism-based rather than purely correlational. We map observed ROSCA behaviour to economic channels identified in the literature. Payment discipline and persistence capture time-consistent commitment \citet{Gugerty2007}. Allocation order and post-payout slippage encode incentive compatibility and moral hazard after receiving the pot \citet{BesleyCoateLoury1993}. Governance and enforcement strength reflect heterogeneity in rules, sanctions, and connectedness \citet{McNabbLeMayBoucherBonan2019}. In bidding ROSCAs, discount level and volatility reveal liquidity stress in the upper tail \citet{Klonner2003,CalomirisRajaraman1998}. Finally, social capital proxies (repeat interaction, centrality, endorsements) raise reputational stakes and strengthen informal enforcement \citet{SchreinerNagarajan2000}.
+
+\section{Target, label, and decision-time discipline (anti-leakage)}
+
+The long-run objective is to estimate PD@3M: the probability that a loan reaches DPD60 within 90 days after disbursement. We define the calibration label:
+\begin{equation}
+\text{Def3M}_i = \Indic\{\text{DPD60 occurs on or before day 90 post-disbursement}\}.
+\end{equation}
+
+All predictors must be computed using only information available at the underwriting decision timestamp $T_i$. This ``decision-time discipline'' prevents leakage and ensures deployability.
+
+Because payout timing matters, define:
+\begin{equation}
+\text{AllocByDec}_i = \Indic\{\text{AllocDate}_i \le T_i\}.
+\end{equation}
+Post-payout features are valid only when $\text{AllocByDec}_i=1$.
+
+\section{Data dictionary (minimum viable schema)}
+
+To keep the system auditable and partner-ready, we define a minimum viable schema. Variable names are intentionally short for operational simplicity. All timestamps are required to respect the decision-time cutoff.
+
+\begin{longtable}{p{0.18\textwidth}p{0.12\textwidth}p{0.12\textwidth}p{0.50\textwidth}}
+\toprule
+\textbf{Field} & \textbf{Level} & \textbf{Type} & \textbf{Definition}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Field} & \textbf{Level} & \textbf{Type} & \textbf{Definition}\\
+\midrule
+\endhead
+mid & member & string & Member identifier \\
+gid & group & string & ROSCA/group identifier \\
+cid & cycle & string & Cycle identifier \\
+mdate & meeting & date & Monthly meeting date \\
+t\_dec & decision & datetime & Underwriting decision timestamp (feature cutoff) \\
+due & meeting & number & Amount due \\
+paid & meeting & number & Amount paid \\
+dlate & meeting & int & Days late (0 if on time) \\
+ont & meeting & \{0,1\} & On-time flag: $1$ if dlate$=0$ \\
+N & cycle & int & Group size \\
+aord & member/cycle & int & Allocation order position (1..N) \\
+adate & member & date & Allocation date (pot receipt) \\
+rtype & group & enum & ROSCA type: RANDOM / BIDDING / COMMITTEE \\
+rules & group & \{0,1\} & Documented rules exist and communicated \\
+san6 & member/group & int & Count of sanctions in last 6 meetings \\
+santype & meeting & enum & LATE\_FEE / ABSENCE\_FINE / WARNING / SUSPENSION / OTHER \\
+sanamt & meeting & number & Monetary amount of sanction \\
+sure\_n & member & int & Number of sureties (0/1/2+) \\
+sure\_type & member & enum & NONE / INDIVIDUAL / POOLED \\
+sure\_str & member & enum & NONE / WEAK / STRONG \\
+bid\_flag & attempt & \{0,1\} & Bid attempt made \\
+disc & attempt & number & Bidding discount (\%) recorded per attempt \\
+rep & member & \{0,1\} & Repeat participation in same group across cycles \\
+cent & member & \{0,1\} & Centrality above group median \\
+end\_f & member & \{0,1\} & Foreman endorsement (clean) \\
+end\_s & member & \{0,1\} & Senior endorsement (clean) \\
+loanid & loan & string & Loan identifier \\
+t\_disb & loan & datetime & Disbursement timestamp \\
+ten & loan & int & Tenor (days) \\
+freq & loan & enum & WEEKLY / BIWEEKLY / MONTHLY \\
+dpd60 & loan & \{0,1\} & DPD60 flag \\
+def3m & loan & \{0,1\} & $\text{Def3M}$ label (defined above) \\
+\bottomrule
+\end{longtable}
+
+\section{From mechanisms to measurement (narrative \texorpdfstring{$\rightarrow$}{->} guided math)}
+
+The design objective of MVS is to remain interpretable while reflecting the non-linear nature of behavioural risk. Early history is disproportionately informative relative to incremental history; 
+tail volatility and clustered slippage matter more than small average differences. We therefore use smooth, monotone non-linear maps—sigmoid, exponential decay, and log transforms—so that the score saturates where it should and becomes sharply sensitive where risk concentrates.
+
+\subsection{Eligible window and time decay}
+
+Let $K_i$ be the number of eligible monthly meetings prior to $T_i$ (standard track: $K_i \ge 6$). Index meetings $m=1,\dots,K_i$ (oldest $\rightarrow$ newest). Define time-decay weights:
+\begin{equation}
+w_{im}=\lambda^{K_i-m}, \qquad 0<\lambda<1,
+\end{equation}
+with a conservative initial setting $\lambda=0.80$ for monthly cadence (sensitivity-tested during calibration).
+
+\subsection{Time-decayed behavioural primitives}
+
+From meeting-level primitives, compute time-decayed on-time rate and average lateness:
+\begin{equation}
+W_i = \sum_{m=1}^{K_i} w_{im}.
+\end{equation}
+
+\begin{equation}
+\text{OTR}_i = \frac{1}{W_i}\sum_{m=1}^{K_i} w_{im}\,\text{ont}_{im},
+\qquad
+\text{AL}_i  = \frac{1}{W_i}\sum_{m=1}^{K_i} w_{im}\,\max(0,\text{dlate}_{im}).
+\end{equation}
+Let $\text{LS}_i$ be the maximum consecutive late streak in the eligible window.
+
+We use:
+\begin{equation}
+\sigmoid(x)=\frac{1}{1+e^{-x}}, \qquad \logonep(x)=\ln(1+x).
+\end{equation}
+
+\subsection{Pillar 1: Payment discipline (PDIS)}
+
+Map primitives into smooth monotone components:
+\begin{align}
+S^{OTR}_i &= 20\cdot \sigmoid\!\left(k_{OTR}(\text{OTR}_i-c_{OTR})\right),\\
+S^{AL}_i  &= 6\cdot \exp\!\left(-a_{AL}\cdot \logonep(\text{AL}_i)\right),\\
+S^{LS}_i  &= 9\cdot \exp\!\left(-a_{LS}\cdot \text{LS}_i\right).
+\end{align}
+A small recovery term $S^{RC}_i$ (``rapid cure'') can be included when late/missed payments are cured within 7 days.
+
+Normalize to a 35-point scale:
+\begin{equation}
+S^{PDIS}_i = \frac{35}{37}\left(S^{OTR}_i+S^{AL}_i+S^{LS}_i+S^{RC}_i\right).
+\end{equation}
+
+\subsection{Pillar 2: Order and post-payout incentives (ORDR)}
+
+Define allocation bucket $\text{AB}_i \in \{\text{EARLY},\text{MID},\text{LATE}\}$ using terciles of $\text{aord}/N$. Assign base multipliers:
+\begin{equation}
+b(\text{LATE})=1.0,\quad b(\text{MID})=0.6,\quad b(\text{EARLY})=0.3.
+\end{equation}
+Define post-payout slippage $\text{Slip}_i$ as an indicator equal to 1 if a new late streak of length $\ge 2$ begins after allocation and before $T_i$ (valid only when $\text{AllocByDec}_i=1$). Then:
+\begin{equation}
+S^{ORDR}_i = 15\cdot b(\text{AB}_i)\cdot (1-\pi_{Slip}\cdot \text{Slip}_i).
+\end{equation}
+
+\subsection{Pillar 3: Governance and enforcement (GOV)}
+
+Map rules and sanctions via monotone functions:
+\begin{align}
+S^{Rules}_i &= 5\cdot \sigmoid\!\left(k_R(\text{rules}_i-0.5)\right),\\
+S^{San}_i   &= 6\cdot \exp(-a_Z\cdot \text{san6}_i).
+\end{align}
+Let $S^{Sure}_i \in \{0,3,6\}$ map surety strength NONE/WEAK/STRONG. Normalize:
+\begin{equation}
+S^{GOV}_i = \frac{20}{17}\left(S^{Rules}_i+S^{San}_i+S^{Sure}_i\right).
+\end{equation}
+
+\subsection{Pillar 4: Liquidity stress in bidding ROSCAs (LIQ)}
+
+For bidding ROSCAs, let $A_i$ be bid attempts in the eligible window. Define attempt volatility via interquartile range:
+\begin{equation}
+\text{IQR}_i = Q_{75}(\text{disc}_{ia}) - Q_{25}(\text{disc}_{ia}), \quad a\in A_i.
+\end{equation}
+Let $q_i\in[0,1]$ be the member's discount quantile rank within the group attempt distribution. Define:
+\begin{align}
+S^{Lvl}_i &= 6\cdot \left(1-\sigmoid\!\left(k_q(q_i-q_0)\right)\right),\\
+S^{Vol}_i &= 6\cdot \exp\!\left(-a_v\cdot \logonep(\text{IQR}_i/v_{ref})\right),\\
+S^{LIQ}_i &= \frac{15}{12}\left(S^{Lvl}_i+S^{Vol}_i\right).
+\end{align}
+
+\subsection{Pillar 5: Social capital (SOC)}
+
+Use a bounded linear combination of cheap observables:
+\begin{equation}
+\text{socraw}_i = 4\,\text{rep}_i + 3\,\text{cent}_i + 2\,\text{end\_f}_i + 2\,\text{end\_s}_i,
+\qquad
+S^{SOC}_i = \frac{15}{11}\,\text{socraw}_i.
+\end{equation}
+
+\subsection{Final score and guardrails}
+
+Compute the raw total:
+\begin{equation}
+\MVS^{raw}_i = S^{PDIS}_i + S^{ORDR}_i + S^{GOV}_i + S^{LIQ}_i + S^{SOC}_i.
+\end{equation}
+
+Guardrails are applied last to prevent tail-risk dilution and structural blind spots. Decision bands (pre-calibration): Green ($\MVS \ge 75$), Amber ($60 \le \MVS \le 74$), Red ($\MVS < 60$).
+
+\section{Strengths, limits, and operational use}
+
+MVS is interpretable: each pillar corresponds to a literature-backed mechanism, enabling transparent reason codes for approvals/declines. It also addresses cold start by enabling underwriting without formal bureau history using repeated behavioural data.
+
+At launch, MVS is not a calibrated PD; it is a decisioning and ranking tool. Accept-only bias is a key risk if lending occurs only to high-score applicants. These limitations are addressed through a governed Phase 1 pilot.
+
+\section{The calibration imperative (phases and why Phase 1 must be governed)}
+
+Stable PD calibration requires outcome data and sufficient default events; event counts, not only loan counts, determine model stability \citet{RileyEtAl2020,VittinghoffMcCulloch2006}. Overly complex models too early risk overfitting. The appropriate approach is phased:
+
+Phase 0 (data readiness): lock taxonomy, schema, timestamps, QA rules, and ensure MVS can be computed deterministically.
+
+Phase 1 (go-live with controlled exploration): deploy MVS with guardrails and reason codes; approve conservatively while allocating a bounded learning budget to generate outcomes beyond the acceptance frontier.
+
+Phase 2 (first calibration): fit parsimonious logistic and/or survival models mapping MVS (and a small set of primitives) to Def3M; validate out-of-time and by group clusters (gid).
+
+Phase 3 (scale and sophistication): as event volume grows, move to monotone GAMs and a monotone GBM challenger; refresh calibration regularly and monitor drift. Probability calibration should be monitored explicitly (see \citealp{SklearnCalib} for standard calibration diagnostics).
+
+\section{Phase 1 pilot governance: numeric limits a partner can sign}
+
+To bound downside while enabling learnable outcomes, the first 500 loans should run under explicit numeric governance constraints. The Core sleeve is at least 85\% of approvals (Green and high-Amber). The Exploration sleeve is capped at 15\% (low-Amber and a small, selected subset of high-potential Red profiles).
+
+Let $E_0$ be the standard initial exposure cap agreed with the partner. In Phase 1, per-borrower maximum exposure is capped at $E_0$ in Core and $0.35E_0$ in Exploration. Products should generate delinquency signals within 90 days: tenor 90--120 days with weekly or biweekly installments.
+
+Hard stop-loss triggers are applied mechanically. Pause new Exploration approvals if Exploration DPD30 exceeds 12\% over the most recent 60 disbursement days, or if Exploration DPD60 exceeds 6\%. Pause all new approvals if portfolio-level DPD60 exceeds 4\% over the most recent 60 disbursement days. Outcomes are monitored by weekly vintages, and each decision stores pillar-level reason codes and guardrail flags.
+
+\section{Strategic positioning (partner discussion)}
+
+This approach is not merely a formula; it is an engineered learning loop. We begin with a mechanism-based, auditable score grounded in ROSCA theory and evidence \citet{BesleyCoateLoury1993,Gugerty2007,McNabbLeMayBoucherBonan2019,Klonner2003,CalomirisRajaraman1998,SchreinerNagarajan2000}. We go live conservatively with guardrails and reason codes, run a governed pilot with bounded exploration, and then calibrate PD@3M with parsimonious models before scaling, consistent with event-driven methodology \citet{RileyEtAl2020,VittinghoffMcCulloch2006}.
+
+\clearpage
+\section*{References}
+\nocite{*}
+\printbibliography
+\end{document}
