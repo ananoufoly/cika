@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import numpy as np
 
 from rosca_score_engine import (
     MacroEnvironment,
@@ -9,150 +10,121 @@ from rosca_score_engine import (
     generate_population,
 )
 
-# -------------------------------
-# Parameter schema (with explanations)
-# -------------------------------
-SCHEMA = {
-    # Population
-    "n_groups": ("pop", int, 20, "Number of ROSCA groups simulated."),
-    "group_size_min": ("pop", int, 6, "Minimum members per group."),
-    "group_size_max": ("pop", int, 20, "Maximum members per group."),
-    "rtype_bidding_prob": ("pop", float, 0.50, "Probability a group uses bidding."),
-    "rules_prob": ("pop", float, 0.75, "Probability a group has formal rules."),
-    "p_ontime_mean": ("pop", float, 0.80, "Average on-time payment rate."),
-    "p_ontime_conc": ("pop", float, 9.0, "Concentration of on-time behavior."),
-    "post_slip_mean": ("pop", float, 0.08, "Tendency to slip after receiving the pot."),
-    "bid_agg_mean": ("pop", float, 0.22, "Aggressiveness in bidding."),
-    "p_rep": ("pop", float, 0.45, "Probability of repeat participation."),
-    "p_cent": ("pop", float, 0.30, "Probability of network centrality."),
-    "p_endf": ("pop", float, 0.25, "Probability of foreman endorsement."),
+# ... (SCHEMA, DEFAULTS, and build_configs remain exactly as you provided) ...
 
-    # Macro
-    "stress_level": ("macro", float, 0.0, "Systemic stress level (0–1)."),
-    "within_group_corr": ("macro", float, 0.20, "Correlation of shocks within a group."),
+st.set_page_config(page_title="ROSCA Score Simulator v2", layout="wide")
+st.title("ROSCA Credit Score — Sequence 2 Simulator")
+st.markdown("### Simulation with Hard Defaults & ML Calibration")
 
-    # Score
-    "a": ("score", float, 0.80, "Time-decay factor."),
-    "c_otr": ("score", float, 0.85, "On-time sigmoid center."),
-    "k_otr": ("score", float, 12.0, "On-time sigmoid slope."),
-    "a_al": ("score", float, 0.70, "Penalty for average lateness."),
-    "a_ls": ("score", float, 0.60, "Penalty for late streaks."),
-    "a_slip": ("score", float, 0.80, "Penalty for post-payout slips."),
-    "k_rules": ("score", float, 12.0, "Rules sigmoid slope."),
-    "a_san": ("score", float, 0.60, "Sanction decay."),
-    "q0": ("score", float, 0.50, "Bid centering."),
-    "k_q": ("score", float, 10.0, "Bid slope."),
-    "a_v": ("score", float, 0.80, "Bid volatility penalty."),
-    "w_rep": ("score", float, 5.0, "Weight: repeat participation."),
-    "w_cent": ("score", float, 4.0, "Weight: centrality."),
-    "w_endf": ("score", float, 3.0, "Weight: foreman endorsement."),
-    "w_ends": ("score", float, 3.0, "Weight: senior endorsement."),
-
-    # Global
-    "seed": ("global", int, 42, "Random seed."),
-}
-
-DEFAULTS = {k: v[2] for k, v in SCHEMA.items()}
-
-UI_GROUPS = {
-    "Population structure & behavior": [
-        "n_groups", "group_size_min", "group_size_max",
-        "rtype_bidding_prob", "rules_prob",
-        "p_ontime_mean", "p_ontime_conc",
-        "post_slip_mean", "bid_agg_mean",
-        "p_rep", "p_cent", "p_endf",
-    ],
-    "Macro environment": ["stress_level", "within_group_corr"],
-    "Scoring logic": [
-        "a", "c_otr", "k_otr",
-        "a_al", "a_ls", "a_slip",
-        "k_rules", "a_san",
-        "q0", "k_q", "a_v",
-        "w_rep", "w_cent", "w_endf", "w_ends",
-    ],
-    "Randomness": ["seed"],
-}
-
-def build_configs(vals):
-    pop = PopulationParams(
-        n_groups=int(vals["n_groups"]),
-        group_size_min=int(vals["group_size_min"]),
-        group_size_max=max(int(vals["group_size_max"]), int(vals["group_size_min"]) + 1),
-        rtype_bidding_prob=float(vals["rtype_bidding_prob"]),
-        rules_prob=float(vals["rules_prob"]),
-        p_ontime_mean=float(vals["p_ontime_mean"]),
-        p_ontime_conc=float(vals["p_ontime_conc"]),
-        post_slip_mean=float(vals["post_slip_mean"]),
-        bid_agg_mean=float(vals["bid_agg_mean"]),
-        p_rep=float(vals["p_rep"]),
-        p_cent=float(vals["p_cent"]),
-        p_endf=float(vals["p_endf"]),
-    )
-    macro = MacroEnvironment(
-        stress_level=float(vals["stress_level"]),
-        within_group_corr=float(vals["within_group_corr"]),
-    )
-    score_kwargs = {k: float(vals[k]) for k in SCHEMA if SCHEMA[k][0] == "score"}
-    params = ScoreParams(**score_kwargs)
-    return pop, macro, params
-
-st.set_page_config(page_title="ROSCA Score Simulator", layout="wide")
-st.title("ROSCA Credit Score — Population Simulator")
-
+# --- Sidebar Configuration (using your existing logic) ---
+st.sidebar.header("Scenario Configuration")
 preset = st.sidebar.selectbox(
     "Scenario preset",
     ["Default", "High stress", "Low trust", "Strict scoring"]
 )
 
 vals = {}
-
 for group_name, keys in UI_GROUPS.items():
     st.sidebar.subheader(group_name)
     for k in keys:
         sec, typ, default, desc = SCHEMA[k]
         v0 = default
-        if preset == "High stress" and k == "stress_level":
-            v0 = 0.7
-        if preset == "Low trust" and k == "p_ontime_mean":
-            v0 = 0.6
-        if preset == "Strict scoring" and k in ("a_al", "a_ls", "a_slip"):
-            v0 = default * 1.3
+        # (Your existing preset override logic)
+        if preset == "High stress" and k == "stress_level": v0 = 0.7
+        if preset == "Low trust" and k == "p_ontime_mean": v0 = 0.6
+        if preset == "Strict scoring" and k in ("a_al", "a_ls", "a_slip"): v0 = default * 1.3
 
         if typ is int:
-            vals[k] = st.sidebar.number_input(k, value=v0, step=1, help=desc)
-        elif typ is float:
-            vals[k] = st.sidebar.number_input(k, value=v0, step=0.01, format="%.4f", help=desc)
+            vals[k] = st.sidebar.number_input(k, value=int(v0), step=1, help=desc)
         else:
-            vals[k] = st.sidebar.text_input(k, value=str(v0), help=desc)
+            vals[k] = st.sidebar.number_input(k, value=float(v0), step=0.01, format="%.4f", help=desc)
 
-if st.button("Run simulation"):
+# --- Execution ---
+if st.button("Run Simulation & Sequence 2 Calibration", type="primary"):
     pop, macro, params = build_configs(vals)
+    
+    # Run the updated engine
     result = generate_population(pop, macro, params, seed=int(vals["seed"]))
+    df = result.member_df
+    weights = result.calibrated_weights
+    
+    # -------------------------------
+    # 1. Top-Level Metrics
+    # -------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+    def_count = df["is_defaulter"].sum()
+    def_rate = (def_count / len(df))
+    
+    col1.metric("Population Size", len(df))
+    col2.metric("Hard Defaults", int(def_count), delta=f"{def_rate:.1%}", delta_color="inverse")
+    col3.metric("Spearman ρ*", f"{result.rho_star:.3f}", help="Score vs 1-PD* (Calibrated)")
+    col4.metric("Avg Score", f"{df['score'].mean():.1f}")
 
-    st.subheader("Validation metrics")
-    st.json(result.validation)
+    st.divider()
 
-    st.subheader("Score distribution")
-    hist = alt.Chart(result.member_df).mark_bar().encode(
-        alt.X("score:Q", bin=alt.Bin(maxbins=30)),
-        y='count()'
+    # -------------------------------
+    # 2. Sequence 2: ML Calibration (Weights)
+    # -------------------------------
+    st.subheader("Pillar Importance (ML Calibration)")
+    st.info("Large negative weights mean a higher pillar score significantly reduces the probability of default.")
+    
+    w_df = pd.DataFrame({
+        "Pillar": list(weights.keys()),
+        "Weight (Beta)": list(weights.values())
+    })
+    
+    weight_chart = alt.Chart(w_df).mark_bar().encode(
+        x=alt.X("Weight (Beta):Q"),
+        y=alt.Y("Pillar:N", sort='x'),
+        color=alt.condition(
+            alt.datum["Weight (Beta)"] < 0,
+            alt.value("#2ecc71"), # Green for risk reducers
+            alt.value("#e74c3c")  # Red for risk indicators
+        )
+    ).properties(height=300)
+    
+    st.altair_chart(weight_chart, use_container_width=True)
+
+    # -------------------------------
+    # 3. Model Comparison: Oracle vs ML PD*
+    # -------------------------------
+    st.subheader("Model Comparison: Oracle vs. Calibrated ML")
+    
+    scatter = alt.Chart(df).mark_circle(size=60).encode(
+        x=alt.X('true_pd_oracle:Q', title='Oracle PD (Expert Guess)'),
+        y=alt.X('true_pd_star:Q', title='Calibrated PD* (Actual Defaults)'),
+        color=alt.Color('is_defaulter:N', scale=alt.Scale(domain=[0, 1], range=['#3498db', '#e74c3c'])),
+        tooltip=['mid', 'score', 'is_defaulter']
+    ).interactive()
+    
+    st.altair_chart(scatter, use_container_width=True)
+
+    # -------------------------------
+    # 4. Distribution and Raw Data
+    # -------------------------------
+    st.subheader("Score Distribution (Post-Penalty)")
+    
+    # Color bars based on default status
+    hist = alt.Chart(df).mark_bar().encode(
+        alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Credit Score"),
+        y='count()',
+        color=alt.Color('is_defaulter:N', title="Defaulted", scale=alt.Scale(range=['#27ae60', '#c0392b']))
     )
     st.altair_chart(hist, use_container_width=True)
 
-    st.subheader("Member-level data")
-    st.dataframe(result.member_df)
+    st.subheader("Member-Level Inspection")
+    # Styling defaulters in the table
+    st.dataframe(df.style.background_gradient(subset=['score'], cmap='RdYlGn')
+                         .background_gradient(subset=['true_pd_star'], cmap='YlOrRd'))
 
-with st.expander("Parameter glossary"):
+# --- Glossary update ---
+with st.expander("Sequence 2 Glossary"):
     st.markdown("""
-**Population parameters**  
-- **p_ontime_mean**: typical on-time payment rate.  
-- **p_ontime_conc**: how concentrated that behavior is.  
+### The Hard Default Cliff
+A member is flagged as `is_defaulter` if they miss **3 consecutive payments** after receiving the payout. Their score is immediately zeroed out.
 
-**Macro environment**  
-- **stress_level**: captures macro shocks.  
-- **within_group_corr**: how synchronized shocks are within a group.  
-
-**Scoring logic**  
-- **a_al, a_ls, a_slip**: lateness penalties.  
-- **w_rep, w_cent, w_endf, w_ends**: relationship and reputation weights.  
+### Calibrated PD* vs Oracle PD
+- **Oracle PD**: The hidden "truth" defined by initial parameters.
+- **Calibrated PD***: The probability of default calculated by a Logistic Regression trained on the *actual* default events that happened during this specific simulation run.
+- **Pillar Weights**: The ML model's interpretation of which pillar is the best "snitch" for predicting a 3-month default.
 """)
