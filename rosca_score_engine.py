@@ -377,12 +377,23 @@ def _max_consec_late(ont_arr: np.ndarray) -> int:
     return max_s
 
 
-def compute_score(member_rows: pd.DataFrame, params: ScoreParams) -> dict:
-    """Compute the 5-pillar credit score for one member from meeting data."""
+def compute_score(member_rows: pd.DataFrame, params: ScoreParams, streak_threshold: int = 0) -> dict:
+    """Compute the 5-pillar credit score for one member from meeting data.
+
+    If streak_threshold > 0, any member who misses that many consecutive meetings
+    after receiving the pot has their score forced to 0 (hard default rule).
+    """
     df = member_rows.sort_values("meeting_no").reset_index(drop=True)
     if df.empty:
-        return {k: 0.0 for k in
-                ["score","s_pdis","s_ordr","s_gov","s_liq","s_soc","otr","al","ls","rc","slip"]}
+        return {"score": 0.0, "s_pdis": 0.0, "s_ordr": 0.0, "s_gov": 0.0, "s_liq": 0.0,
+                "s_soc": 0.0, "otr": 0.0, "al": 0.0, "ls": 0, "rc": 0.0, "slip": 0,
+                "bucket": "n/a", "san6": 0.0, "b_ord": 0.0, "tdec": 0, "K": 0, "defaulted": False}
+
+    K = len(df)
+
+    # Detect default early but do NOT return yet — we still compute payment metrics
+    # so that otr/al/ls/rc are available (non-zero) for logistic PD* fitting.
+    _is_default = streak_threshold > 0 and detect_default_from_meetings(df, streak_threshold)
 
     n        = int(df["_n"].iloc[0])
     rtype    = df["rtype"].iloc[0]
@@ -395,7 +406,6 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams) -> dict:
     end_f    = int(df["end_f"].iloc[0])
     end_s    = int(df["end_s"].iloc[0])
 
-    K = len(df)
     a = params.a
     ms = np.arange(1, K + 1)
     w = a ** (K - ms)
@@ -465,6 +475,12 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams) -> dict:
 
     score = s_pdis + s_ordr + s_gov + s_liq + s_soc
 
+    # Hard default rule: zero ALL score pillars if post-allocation default detected.
+    # Payment metrics (otr, al, ls, rc, slip) are preserved so logistic PD* has
+    # meaningful non-zero features for defaulters.
+    if _is_default:
+        score = s_pdis = s_ordr = s_gov = s_liq = s_soc = 0.0
+
     return {
         "score":  round(score, 3),
         "s_pdis": round(s_pdis, 3),
@@ -475,6 +491,7 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams) -> dict:
         "otr": round(otr, 4), "al": round(al, 4),
         "ls": ls, "rc": round(rc, 4), "slip": slip,
         "bucket": bucket, "san6": san6, "b_ord": b_ord, "tdec": tdec, "K": K,
+        "defaulted": _is_default,
     }
 
 
@@ -518,8 +535,69 @@ def _compute_validation(member_df: pd.DataFrame) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 10. Simulation result
+# 10. PD* validation  (primary evaluation axis — MC-estimated default frequency)
 # ---------------------------------------------------------------------------
+
+def compute_pd_star_validation(member_df: pd.DataFrame) -> Dict[str, Any]:
+    """Compute validation metrics using pd_star (MC default frequency) as the reference.
+
+    member_df must contain columns: 'score', 'pd_star'.
+    If 'defaulted' (bool) is also present, binary separation metrics are added.
+
+    This is the primary evaluation function.  true_pd is not used here.
+    """
+    if "pd_star" not in member_df.columns:
+        raise ValueError("member_df must contain 'pd_star'. Run compute_pd_star_mc first.")
+
+    scores   = member_df["score"].values.astype(float)
+    pd_stars = member_df["pd_star"].values.astype(float)
+
+    rho = _spearman(scores, 1.0 - pd_stars)
+
+    try:
+        quintile_labels = pd.qcut(
+            pd_stars, q=5,
+            labels=["PD*_Q1", "PD*_Q2", "PD*_Q3", "PD*_Q4", "PD*_Q5"],
+            duplicates="drop",
+        )
+    except Exception:
+        quintile_labels = pd.cut(
+            pd_stars, bins=5,
+            labels=["PD*_Q1", "PD*_Q2", "PD*_Q3", "PD*_Q4", "PD*_Q5"],
+        )
+
+    by_quintile = (
+        member_df.assign(_pdstar_q=quintile_labels)
+        .groupby("_pdstar_q", observed=True)["score"]
+        .agg(["mean", "std", "count"])
+        .round(2)
+    )
+
+    median_pdstar = float(np.median(pd_stars))
+    hi_pd = scores[pd_stars >= median_pdstar]
+    lo_pd = scores[pd_stars <  median_pdstar]
+    separation = float(lo_pd.mean() - hi_pd.mean()) if len(hi_pd) and len(lo_pd) else float("nan")
+
+    out: Dict[str, Any] = {
+        "spearman_rho_pdstar":     round(rho, 4),
+        "score_separation_pdstar": round(separation, 2),
+        "pd_star_mean": round(float(pd_stars.mean()), 4),
+        "pd_star_std":  round(float(pd_stars.std()),  4),
+        "n_members":    len(member_df),
+        "score_by_pdstar_quintile": by_quintile,
+    }
+
+    if "defaulted" in member_df.columns:
+        defaulted = member_df["defaulted"].astype(bool)
+        out["default_rate"]             = round(float(defaulted.mean()), 4)
+        out["n_defaulted"]              = int(defaulted.sum())
+        out["score_mean_defaulted"]     = round(float(scores[defaulted.values].mean()), 2) \
+                                          if defaulted.any() else 0.0
+        out["score_mean_non_defaulted"] = round(float(scores[~defaulted.values].mean()), 2) \
+                                          if (~defaulted).any() else 0.0
+
+    return out
+
 
 @dataclass
 class SimulationResult:
@@ -538,97 +616,56 @@ def generate_population(
     params: ScoreParams,
     seed: int = 42,
     K_min: int = 6,
+    default_streak_threshold: int = 0,
 ) -> SimulationResult:
     """
-    Generate `pop.n_groups` random groups, draw member profiles, apply macro
-    environment, generate meeting data, compute scores, and compute validation
-    metrics against true PD.
+    Draw member profiles (fixed by seed), generate one realisation of meeting
+    data, compute scores, and validate against true PD.
+
+    Profiles are drawn via draw_population_profiles so they are identical to
+    what compute_pd_star_mc uses — ensuring score and PD* are comparable.
+    Meeting shocks use per-group / per-member deterministic seeds so each call
+    with the same seed reproduces exactly.
 
     Parameters
     ----------
-    pop    : PopulationParams — controls group/member distributions
-    macro  : MacroEnvironment — controls systemic shocks
-    params : ScoreParams — the scoring hyperparameters to evaluate
-    seed   : int — reproducibility
-    K_min  : int — minimum meetings per cycle (spec: ≥ 6)
+    pop                      : PopulationParams
+    macro                    : MacroEnvironment
+    params                   : ScoreParams
+    seed                     : int — controls both profile draw and meeting shocks
+    K_min                    : int — minimum meetings per cycle (≥ 6)
+    default_streak_threshold : int — if > 0, any member missing this many
+                               consecutive meetings after allocation gets score 0
     """
-    rng = np.random.default_rng(seed)
     base_date = pd.Timestamp("2024-01-01")
 
-    all_profiles: List[MemberProfile] = []
-    all_meetings: List[pd.DataFrame]  = []
+    # Step 1: draw fixed profiles — same draw order as compute_pd_star_mc
+    profiles_by_group = draw_population_profiles(pop, macro, seed=seed, K_min=K_min)
 
-    # ----- draw groups -------------------------------------------------------
-    for g_idx in range(pop.n_groups):
-        gid = f"G{g_idx+1:02d}"
+    all_meetings: List[pd.DataFrame] = []
 
-        n          = int(rng.integers(pop.group_size_min, pop.group_size_max + 1))
-        rtype      = "bidding" if rng.random() < pop.rtype_bidding_prob else "random"
-        rules      = rng.random() < pop.rules_prob
-        san_rate   = float(rng.uniform(pop.san_rate_min, pop.san_rate_max))
-        num_cycles = int(rng.integers(pop.num_cycles_min, pop.num_cycles_max + 1))
-
-        # Allocation order: random shuffle of 1..n (per cycle → use first cycle as aord)
-        aord_list = list(rng.permutation(n) + 1)   # 1-based
+    # Step 2: generate meeting data with per-group / per-member RNGs
+    for gid, group_meta, group_profiles in profiles_by_group:
+        n          = group_meta["n"]
+        rtype      = group_meta["rtype"]
+        num_cycles = group_meta["num_cycles"]
 
         meetings_per_cycle = max(K_min, n)
-        total_meetings = meetings_per_cycle * num_cycles
+        total_meetings     = meetings_per_cycle * num_cycles
 
-        # Pre-draw group-level meeting shocks (one per meeting per group)
+        # Deterministic group-shock RNG (same convention as compute_pd_star_mc run 0)
+        rng_group   = np.random.default_rng(seed + (abs(hash(gid))   % (2 ** 31)))
         group_shocks = {
-            m: float(rng.standard_normal())
+            m: float(rng_group.standard_normal())
             for m in range(1, total_meetings + 1)
         }
 
-        # ----- draw members --------------------------------------------------
-        a_otr, b_otr = pop._beta_params(pop.p_ontime_mean, pop.p_ontime_conc)
-        a_slip, b_slip = pop._beta_params(pop.post_slip_mean, pop.post_slip_conc)
-        a_bid, b_bid   = pop._beta_params(pop.bid_agg_mean, pop.bid_agg_conc)
-
-        group_profiles: List[MemberProfile] = []
-        for m_idx in range(n):
-            mid = f"{gid}_M{m_idx+1:02d}"
-            aord = int(aord_list[m_idx])
-
-            p_ontime_raw  = float(np.clip(rng.beta(a_otr, b_otr), 0.01, 0.99))
-            dlate_mu      = float(np.clip(rng.lognormal(pop.dlate_lognorm_mu,
-                                                         pop.dlate_lognorm_sigma), 1.0, 60.0))
-            post_slip     = float(np.clip(rng.beta(a_slip, b_slip), 0.0, 1.0))
-            bid_agg       = float(np.clip(rng.beta(a_bid, b_bid), 0.0, 0.99))
-            bid_vol       = float(rng.uniform(pop.bid_vol_min, pop.bid_vol_max))
-
-            rep   = rng.random() < pop.p_rep
-            cent  = rng.random() < pop.p_cent
-            endf  = rng.random() < pop.p_endf
-            ends  = rng.random() < pop.p_ends
-
-            r_sure = rng.random()
-            if r_sure < pop.p_sure_none:
-                sure_str = "none"
-            elif r_sure < pop.p_sure_none + pop.p_sure_weak:
-                sure_str = "weak"
-            else:
-                sure_str = "strong"
-
-            profile = MemberProfile(
-                mid=mid, gid=gid, n=n, aord=aord, rtype=rtype,
-                rules=rules, san_rate=san_rate, num_cycles=num_cycles,
-                p_ontime_raw=p_ontime_raw, dlate_mu=dlate_mu,
-                post_slip_prob=post_slip, bid_aggressiveness=bid_agg,
-                bid_volatility=bid_vol,
-                rep=rep, cent=cent, endf=endf, ends=ends, sure_str=sure_str,
-            )
-            profile.true_pd = _compute_true_pd(profile, macro.stress_level, rng)
-            group_profiles.append(profile)
-
-        all_profiles.extend(group_profiles)
-
-        # ----- generate meeting rows -----------------------------------------
         g_rows: List[dict] = []
         for profile in group_profiles:
+            rng_member = np.random.default_rng(seed + (abs(hash(profile.mid)) % (2 ** 31)))
             g_rows.extend(
                 _generate_member_meetings(
-                    profile, macro, group_shocks, rng, base_date, K_min,
+                    profile, macro, group_shocks, rng_member, base_date, K_min,
                 )
             )
 
@@ -643,28 +680,28 @@ def generate_population(
         for _, grp in mtg.groupby("mid", sort=False):
             sv = grp["san_flag"].values
             san6_vals.extend(
-                int(sv[max(0, i-5):i+1].sum()) for i in range(len(sv))
+                int(sv[max(0, i - 5):i + 1].sum()) for i in range(len(sv))
             )
         mtg["san6"] = san6_vals
 
         # Disc quantile rank within group (for liq pillar)
         if rtype == "bidding":
-            bid_only = mtg[mtg["bid"] == 1]
+            bid_only         = mtg[mtg["bid"] == 1]
             member_mean_disc = bid_only.groupby("mid")["disc"].mean()
-            ranks = member_mean_disc.rank(pct=True) if len(member_mean_disc) > 1 \
-                    else member_mean_disc * 0 + 0.5
+            ranks = (member_mean_disc.rank(pct=True) if len(member_mean_disc) > 1
+                     else member_mean_disc * 0 + 0.5)
             mtg["_disc_q_rank"] = mtg["mid"].map(ranks).fillna(0.5)
         else:
             mtg["_disc_q_rank"] = 0.5
 
         all_meetings.append(mtg)
 
-    # ----- score all members -------------------------------------------------
+    # Step 3: score all members
     meeting_df = pd.concat(all_meetings, ignore_index=True) if all_meetings else pd.DataFrame()
 
     score_rows: List[dict] = []
     for mid_val, member_rows in meeting_df.groupby("mid", sort=False):
-        sd = compute_score(member_rows, params)
+        sd = compute_score(member_rows, params, streak_threshold=default_streak_threshold)
         true_pd = float(member_rows["_true_pd"].iloc[0])
         p_raw   = float(member_rows["_p_ontime_raw"].iloc[0])
         gid_val = member_rows["gid"].iloc[0]
@@ -677,7 +714,7 @@ def generate_population(
 
     member_df = pd.DataFrame(score_rows)
     front = ["mid", "gid", "rtype", "true_pd", "p_ontime_raw",
-             "score", "s_pdis", "s_ordr", "s_gov", "s_liq", "s_soc"]
+             "score", "s_pdis", "s_ordr", "s_gov", "s_liq", "s_soc", "defaulted"]
     rest  = [c for c in member_df.columns if c not in front]
     member_df = member_df[front + rest].reset_index(drop=True)
 
@@ -722,18 +759,20 @@ def generate_population_with_defaults(
     K_min: int = 6,
     streak_threshold: int = 3,
 ) -> SimulationResult:
-    """Run the standard generate_population and attach a binary 'default' flag per member using the rule:
-    default if the member misses `streak_threshold` consecutive meetings after allocation.
+    """Simulate population with scores zeroed for post-allocation defaulters.
+
+    A member defaults if they miss `streak_threshold` consecutive meetings after
+    receiving the pot.  Their score is forced to 0 via compute_score's hard rule.
+    The 'defaulted' column (bool) is always present in member_df.
+    'default' is kept as an alias for backward compatibility.
     """
-    result = generate_population(pop, macro, params, seed=seed, K_min=K_min)
-    meeting_df = result.meeting_df
-    defaults = {}
-    for mid, grp in meeting_df.groupby("mid", sort=False):
-        defaults[mid] = detect_default_from_meetings(grp, streak_threshold=streak_threshold)
+    result = generate_population(
+        pop, macro, params, seed=seed, K_min=K_min,
+        default_streak_threshold=streak_threshold,
+    )
     member_df = result.member_df.copy()
-    member_df["default"] = member_df["mid"].map(defaults).fillna(False).astype(bool)
-    # keep original validation (against latent true_pd) but user can compute PD* externally
-    return SimulationResult(member_df=member_df, meeting_df=meeting_df, validation=result.validation)
+    member_df["default"] = member_df["defaulted"].astype(bool)
+    return SimulationResult(member_df=member_df, meeting_df=result.meeting_df, validation=result.validation)
 
 
 def draw_population_profiles(
@@ -833,11 +872,11 @@ def compute_pd_star_mc(
             meetings_per_cycle = max(K_min, group_meta["n"])
             total_meetings = meetings_per_cycle * group_meta["num_cycles"]
             # create a run-specific RNG for group shocks (use run_seed + gid hash for variation)
-            rng_group = np.random.default_rng(run_seed + (hash(gid) & 0xFFFF))
+            rng_group = np.random.default_rng(run_seed + (abs(hash(gid))   % (2 ** 31)))
             group_shocks = {m: float(rng_group.standard_normal()) for m in range(1, total_meetings + 1)}
             # For each profile, create a per-member RNG seeded deterministically from run_seed and mid
             for profile in group_profiles:
-                rng_member = np.random.default_rng(run_seed + (hash(profile.mid) & 0xFFFF))
+                rng_member = np.random.default_rng(run_seed + (abs(hash(profile.mid)) % (2 ** 31)))
                 rows = _generate_member_meetings(profile, macro, group_shocks, rng_member, base_date, K_min)
                 all_rows.extend(rows)
         meeting_df = pd.DataFrame(all_rows)
@@ -880,9 +919,16 @@ def fit_logistic_pd_star(
         raise RuntimeError("scikit-learn is required for logistic PD* fitting but is not installed.")
 
     if feature_cols is None:
-        # prefer score components if present, else fall back to p_ontime_raw and true_pd
-        candidate = ["s_pdis", "s_ordr", "s_gov", "s_liq", "s_soc", "p_ontime_raw", "true_pd"]
+        # Use observable payment-history metrics as features.
+        # These are non-zero even for defaulters (computed before the score is zeroed),
+        # which gives a smooth PD* gradient rather than a binary split.
+        # true_pd and score pillars are intentionally excluded.
+        candidate = ["otr", "al", "ls", "rc", "slip", "san6", "p_ontime_raw"]
         feature_cols = [c for c in candidate if c in stacked_runs_df.columns]
+        if not feature_cols:
+            # last fallback: score pillars (will produce bimodal PD* for zeroed members)
+            candidate2 = ["s_pdis", "s_ordr", "s_gov", "s_liq", "s_soc"]
+            feature_cols = [c for c in candidate2 if c in stacked_runs_df.columns]
         if not feature_cols:
             raise ValueError("No suitable feature columns found in stacked_runs_df. Provide feature_cols explicitly.")
 

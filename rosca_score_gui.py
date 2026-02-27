@@ -32,6 +32,7 @@ from rosca_score_engine import (
     generate_population_with_defaults,
     compute_pd_star_mc,
     fit_logistic_pd_star,
+    compute_pd_star_validation,
 )
 
 console = Console()
@@ -178,10 +179,17 @@ def show_results(result, vals: Dict[str, Any]):
         qt_lines.append(f"  [{colour}]{str(idx):<6}[/] [dim white]│[/] [{colour}]{bar}[/] [bold white]{row['mean']:5.1f}[/] [dim]n={int(row['count'])}[/]")
     console.print(Panel("\n".join(qt_lines), title="[bold]Score by True-PD Quintile[/]", border_style="magenta", padding=(0,1)))
 
-    # If default column exists, show default rate
-    if "default" in df.columns:
-        default_rate = df["default"].mean()
-        console.print(Panel(f"  [bold]Observed default rate[/]  [red]{default_rate:.2%}[/]", title="[bold]Defaults[/]", border_style="red", padding=(0,1)))
+    # Defaulter panel (shown when default zeroing was applied)
+    if "defaulted" in df.columns:
+        n_def = int(df["defaulted"].sum())
+        def_rate = df["defaulted"].mean()
+        sc_def  = df.loc[df["defaulted"], "score"].mean() if n_def > 0 else 0.0
+        sc_ndef = df.loc[~df["defaulted"], "score"].mean() if n_def < len(df) else 0.0
+        console.print(Panel(
+            f"  [bold]Defaulters (score → 0)[/]  [red]{n_def}[/] / {len(df)}  ({def_rate:.2%})\n"
+            f"  [bold]Mean score — defaulted[/]  [red]{sc_def:.1f}[/]    [bold]non-defaulted[/]  [green]{sc_ndef:.1f}[/]",
+            title="[bold]Default Rule[/]", border_style="red", padding=(0, 1),
+        ))
 
     # Top / bottom by score
     t = Table(box=box.SIMPLE, show_header=True, header_style="bold white", show_edge=False, padding=(0,1))
@@ -224,11 +232,11 @@ def run_fit_logit(stacked_runs_df, feature_cols: Optional[List[str]] = None):
 
 HELP = """
 Commands
-  run                      — simulate with current params, show results
-  run_defaults             — simulate and attach binary 'default' flag (miss N meetings after allocation)
-  mc_pd                    — run Monte Carlo PD* estimation (uses streak_threshold and mc_runs)
-  fit_logit                — fit logistic PD* on stacked runs (requires stacked runs with 'default' column)
-  eval_pdstar              — compare score vs PD* (MC frequency or logistic probabilities)
+  run_defaults             — simulate with default-zeroing rule, fit logistic PD*, show results
+  eval_pdstar              — compare score vs PD* (primary validation)
+  fit_logit                — (re-)fit logistic PD* on last run_defaults result
+  run                      — simulate without default-zeroing (baseline)
+  mc_pd                    — optional: run Monte Carlo PD* estimation (mc_runs simulations, slower)
   set <param> <value>      — change one parameter
   sweep <param> v1 v2 ...  — sensitivity: run once per value, compare ρ
   show [pop|macro|score|pdstar] — print current params
@@ -331,52 +339,97 @@ def main():
             console.print("[green]Logistic PD* model fitted and results stored in last_logit_df.[/]")
 
         elif cmd == "eval_pdstar":
-            pop, macro, params = _build_configs(vals)
-            with console.status("[bold green]Simulating baseline population for evaluation…[/]", spinner="dots"):
-                base_result = generate_population(pop, macro, params, seed=int(vals["seed"]))
-            member_df = base_result.member_df.copy()
-            if last_logit_df is not None:
-                df_map = last_logit_df.set_index("mid")["pd_star_logit"].to_dict()
-                member_df["pd_star"] = member_df["mid"].map(df_map).fillna(0.0)
-                source = "logistic"
-            elif last_mc_df is not None:
-                df_map = last_mc_df.set_index("mid")["pd_star"].to_dict()
-                member_df["pd_star"] = member_df["mid"].map(df_map).fillna(0.0)
+            # Determine PD* source
+            if last_mc_df is not None:
+                pd_source_df = last_mc_df[["mid", "pd_star"]].copy()
                 source = "mc_freq"
+            elif last_logit_df is not None:
+                pd_source_df = last_logit_df[["mid", "pd_star_logit"]].rename(
+                    columns={"pd_star_logit": "pd_star"})
+                source = "logistic"
             elif last_stacked_runs is not None and "default" in last_stacked_runs.columns:
-                df_map = last_stacked_runs.set_index("mid")["default"].astype(int).to_dict()
-                member_df["pd_star"] = member_df["mid"].map(df_map).fillna(0.0)
+                pd_source_df = last_stacked_runs[["mid"]].copy()
+                pd_source_df["pd_star"] = last_stacked_runs["default"].astype(float).values
                 source = "single_run_default"
             else:
                 console.print("[red]No PD* source available. Run 'mc_pd', 'run_defaults', or 'fit_logit' first.[/]")
                 continue
 
+            # Merge PD* into current member_df (re-use last result if available, else re-run)
+            if last_stacked_runs is not None and "score" in last_stacked_runs.columns:
+                member_df = last_stacked_runs.copy()
+            else:
+                pop, macro, params = _build_configs(vals)
+                streak = int(vals.get("streak_threshold", 3))
+                with console.status("[bold green]Simulating for evaluation…[/]", spinner="dots"):
+                    base_result = generate_population_with_defaults(
+                        pop, macro, params, seed=int(vals["seed"]),
+                        streak_threshold=streak,
+                    )
+                member_df = base_result.member_df.copy()
+
+            pd_map = pd_source_df.set_index("mid")["pd_star"].to_dict()
+            member_df["pd_star"] = member_df["mid"].map(pd_map)
+            member_df = member_df.dropna(subset=["pd_star"])
+
+            if member_df.empty:
+                console.print("[red]No members matched between simulation and PD* source.[/]")
+                continue
+
+            # Primary validation via engine function
+            pv = compute_pd_star_validation(member_df)
+            rho = pv["spearman_rho_pdstar"]
+            sep = pv["score_separation_pdstar"]
+
+            rho_colour = "green" if rho >= 0.40 else ("yellow" if rho >= 0.20 else "red")
+            lines = [
+                f"  [bold]Source[/]                    [dim]{source}[/]",
+                f"  [bold]Members evaluated[/]         {pv['n_members']}",
+                f"  [bold]Spearman ρ (score, 1−PD*)[/] [{rho_colour}]{rho:+.4f}[/]  ← primary metric",
+                f"  [bold]Score separation[/]          [cyan]{sep:+.2f} pts[/]  (low-PD* minus high-PD*)",
+                f"  [bold]Mean PD*[/]                  {pv['pd_star_mean']:.4f} ± {pv['pd_star_std']:.4f}",
+            ]
+            if "n_defaulted" in pv:
+                lines += [
+                    f"  [bold]Defaulters[/]                [red]{pv['n_defaulted']}[/] ({pv['default_rate']:.2%})",
+                    f"  [bold]Score: defaulted[/]          [red]{pv['score_mean_defaulted']:.1f}[/]    "
+                    f"[bold]non-defaulted[/]  [green]{pv['score_mean_non_defaulted']:.1f}[/]",
+                ]
+            console.print(Panel("\n".join(lines), title="[bold]PD* Validation[/]", border_style="cyan"))
+
+            # AUC if sklearn available and binary default column exists
             try:
                 from sklearn.metrics import roc_auc_score, brier_score_loss
-                import numpy as _np
-                y_true = member_df["pd_star"].values.astype(float)
-                y_score = member_df["score"].values.astype(float)
-                smin, smax = y_score.min(), y_score.max()
-                if smax > smin:
-                    y_score_norm = (y_score - smin) / (smax - smin)
-                else:
-                    y_score_norm = y_score * 0.0
-                auc = roc_auc_score(y_true, y_score_norm) if y_true.sum() > 0 else float("nan")
-                brier = brier_score_loss(y_true, y_score_norm)
-                from numpy import argsort
-                def spearman(a,b):
-                    rx = argsort(argsort(a)).astype(float)
-                    ry = argsort(argsort(b)).astype(float)
-                    n = len(a)
-                    d2 = ((rx-ry)**2).sum()
-                    return 1.0 - 6.0*d2/(n*(n**2-1)) if n>=3 else float("nan")
-                rho = spearman(y_score, 1.0 - y_true)
+                if "defaulted" in member_df.columns:
+                    y_true = member_df["defaulted"].astype(int).values
+                    y_score = member_df["score"].values.astype(float)
+                    smin, smax = y_score.min(), y_score.max()
+                    y_norm = (y_score - smin) / (smax - smin + 1e-9)
+                    auc = roc_auc_score(y_true, y_norm) if y_true.sum() > 0 else float("nan")
+                    brier = brier_score_loss(y_true, y_norm)
+                    auc_c = "green" if auc >= 0.70 else "yellow"
+                    console.print(Panel(
+                        f"  [bold]AUC  (score → default)[/]   [{auc_c}]{auc:.4f}[/]\n"
+                        f"  [bold]Brier score[/]              {brier:.4f}",
+                        title="[bold]Binary Default Metrics[/]", border_style="green",
+                    ))
             except Exception:
-                auc = float("nan"); brier = float("nan"); rho = float("nan")
+                pass
 
-            console.print(Panel(f"[bold]Evaluation vs PD* ({source})[/]\nSpearman(score,1-PD*): {rho:+.4f}\nAUC (score→PD*): {auc:.4f}\nBrier (score norm): {brier:.4f}", title="[bold]PD* Evaluation[/]", border_style="cyan"))
-            top = member_df.sort_values("pd_star", ascending=False).head(10)[["mid","gid","pd_star","score","true_pd"]]
-            console.print(Panel(top.to_string(index=False), title="[bold]Top by PD*[/]", border_style="magenta"))
+            # Quintile table
+            qt = pv["score_by_pdstar_quintile"]
+            console.print(Panel(
+                qt.to_string(),
+                title="[bold]Score by PD* Quintile  (should decrease Q1 → Q5)[/]",
+                border_style="magenta",
+            ))
+
+            # Top 10 by PD*
+            top = member_df.sort_values("pd_star", ascending=False).head(10)
+            show_cols = ["mid", "gid", "pd_star", "score", "true_pd"] + \
+                        (["defaulted"] if "defaulted" in top.columns else [])
+            console.print(Panel(top[show_cols].to_string(index=False),
+                                title="[bold]Top 10 by PD*[/]", border_style="red"))
 
         elif cmd == "set":
             if len(args) < 2:
