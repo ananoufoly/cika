@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+""" 
+TRIBUS — Combined Ops Stress + Macro Stress → Contribution Revenue Risk (v2 FIXED)
+================================================================================
+
+This file is the patched version of v2.
+
+Fix applied
+-----------
+- Fixed IndexError in `sample_mean_severity_per_sim()` that could occur when many simulations have
+  zero failures for a given size/month. The previous implementation used `np.add.reduceat` with
+  start indices that could hit the end of the draws array when trailing zeros exist.
+- New implementation computes reduceat only on the NON-ZERO segments and writes results back,
+  making it robust and preserving tail sampling.
+
+Features (same as v2)
+---------------------
+1) Macro–Ops correlation inside scenarios via correlated shocks (M_t, O_t).
+2) Tail severity preserved by sampling platform severity *per failure* from empirical TotalImpactPct.
+3) Ops hazard and severity intensify dynamically with O_t.
+
+Normalization
+-------------
+- Contribution amount C is normalized to 1.
+- Take rate tau is a fraction of contribution (e.g., 0.015 = 1.5%).
+- Penalties apply to MISSED contributions only.
+
+Run
+---
+python tribus_combined_ops_macro_rev_risk_v2_fixed.py
+
+Dependencies
+------------
+Requires your platform stress engine file in the same folder:
+  tribus_st_with_dashboard_suite_bestpractice.py
+"""
+
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
+import numpy as np
+import pandas as pd
+import importlib.util
+from pathlib import Path
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def sigmoid(x: np.ndarray) -> np.ndarray:
+  return 1.0 / (1.0 + np.exp(-x))
+
+
+def logit(p: float) -> float:
+  p = float(np.clip(p, 1e-6, 1 - 1e-6))
+return float(np.log(p / (1 - p)))
+
+
+def prompt_int(msg: str, default: int) -> int:
+  out = input(f"{msg} [{default}]: ").strip()
+return int(out) if out else default
+
+
+def prompt_float(msg: str, default: float) -> float:
+  out = input(f"{msg} [{default}]: ").strip()
+return float(out) if out else default
+
+
+def prompt_str(msg: str, default: str) -> str:
+  out = input(f"{msg} [{default}]: ").strip()
+return out if out else default
+
+
+def prompt_bool(msg: str, default: bool) -> bool:
+  d = 'y' if default else 'n'
+out = input(f"{msg} [y/n, default={d}]: ").strip().lower()
+if not out:
+  return default
+return out in ("y", "yes", "1", "true", "t")
+
+
+def monthly_hazard_from_cycle_prob(p_cycle: float, cycle_len: int) -> float:
+  """Convert probability of >=1 event over cycle_len periods into per-period hazard."""
+p_cycle = float(np.clip(p_cycle, 0.0, 1.0))
+cycle_len = max(int(cycle_len), 1)
+return 1.0 - (1.0 - p_cycle) ** (1.0 / cycle_len)
+
+
+def draw_correlated_normals(rng: np.random.Generator, n: int, rho: float,
+                            m_shift: float = 0.0, o_shift: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+  """Draw (M,O) correlated normals with Corr=rho and optional mean shifts."""
+rho = float(np.clip(rho, -0.999, 0.999))
+z1 = rng.standard_normal(n)
+z2 = rng.standard_normal(n)
+M = z1 + m_shift
+O = rho * z1 + np.sqrt(1.0 - rho**2) * z2 + o_shift
+return M, O
+
+
+# -------------------------
+# Load platform engine as module
+# -------------------------
+
+def load_platform_engine(path: str = "tribus_st_with_dashboard_suite_bestpractice.py"):
+  p = Path(path)
+if not p.exists():
+  raise FileNotFoundError(f"Cannot find platform engine: {path}")
+spec = importlib.util.spec_from_file_location("tribus_platform_engine", str(p))
+mod = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+spec.loader.exec_module(mod)
+return mod
+
+
+# -------------------------
+# Config
+# -------------------------
+
+OPS_SCENARIOS = ["central", "peak_load", "major_incident"]
+MACRO_SCENARIOS = ["baseline", "adverse"]
+
+
+@dataclass
+class CombinedConfig:
+  # Simulation
+  n_sims: int = 5000
+months: int = 12
+seed: int = 42
+
+# Portfolio / size mix
+total_groups: int = 100
+N_values: Tuple[int, ...] = (10, 12, 15, 20, 25, 30)
+N_probs: Tuple[float, ...] = (0.25, 0.15, 0.10, 0.15, 0.15, 0.20)
+
+# Monetization (C=1 normalized)
+tau_take_rate: float = 0.015
+penalty_lambda: float = 0.025
+penalty_realization: float = 0.30
+
+# Macro behavioural targets (baseline)
+p_eff0: float = 0.95
+q0_baseline: float = 0.995
+r0: float = 0.55
+j0: float = 0.002
+
+# Macro sensitivities to M
+b_payM: float = -0.9
+b_recM: float = 0.7
+b_jM: float = 0.9
+
+# Macro adverse shift
+macro_shift_adverse: float = 0.9
+
+# Macro–Ops correlation
+rho_MO: float = 0.35
+ops_shift_by_regime: Dict[str, float] = None
+
+# Ops intensity scaling with O
+kappa_fail_O: float = 0.60
+kappa_sev_O: float = 0.50
+
+# Mapping platform severity -> collection impairment
+impact_mode: str = "economic_loss"  # recommended
+gamma_impact_to_q: float = 1.0
+q_floor: float = 0.0
+
+# Mapping soft collapse -> death
+soft_to_death_weight: float = 0.35
+
+# Arrears writeoff on group death
+kappa_arrears_group: float = 1.5
+
+# Platform engine controls
+platform_regime: str = "existing"
+platform_G: int = 5000
+platform_seed: int = 42
+platform_rev_per_member_per_month: float = 1.0
+
+def __post_init__(self):
+  if self.ops_shift_by_regime is None:
+  self.ops_shift_by_regime = {
+    "central": 0.0,
+    "peak_load": 0.25,
+    "major_incident": 0.50,
+  }
+
+
+# -------------------------
+# Platform calibration extraction
+# -------------------------
+
+class PlatformCalibrator:
+  def __init__(self, platform_mod, cfg: CombinedConfig):
+  self.pm = platform_mod
+self.cfg = cfg
+self.cache: Dict[str, Dict[str, object]] = {}
+
+def run_ops_scenario(self, ops_scenario: str) -> Dict[str, object]:
+  if ops_scenario in self.cache:
+  return self.cache[ops_scenario]
+
+pcfg = self.pm.Config()
+pcfg.regime = self.cfg.platform_regime
+pcfg.G = self.cfg.platform_G
+pcfg.seed = self.cfg.platform_seed
+pcfg.rev_per_member_per_month = self.cfg.platform_rev_per_member_per_month
+pcfg.N_values = tuple(self.cfg.N_values)
+pcfg.N_probs = tuple(self.cfg.N_probs)
+pcfg.T_equals_N = True
+
+self.pm.apply_preset(pcfg, f"{pcfg.regime}.{ops_scenario}")
+pcfg._availability_target = "99.9"
+self.pm.apply_availability_target(pcfg)
+
+res = self.pm.simulate(pcfg)
+raw = res["raw"].copy()
+byN = res["byN"].copy()
+
+vote_failed_byN = raw.groupby("N")["VoteFailedFlag"].mean().rename("P_VoteFailed").reset_index()
+byN = byN.merge(vote_failed_byN, on="N", how="left")
+
+sev_samples: Dict[int, np.ndarray] = {}
+for n in sorted(raw["N"].unique()):
+  sev_samples[int(n)] = raw.loc[raw["N"] == n, "TotalImpactPct"].to_numpy(copy=True)
+
+out = {"raw": raw, "byN": byN, "sev_samples": sev_samples}
+self.cache[ops_scenario] = out
+return out
+
+def get_size_maps(self, ops_scenario: str) -> Dict[int, Dict[str, float]]:
+  res = self.run_ops_scenario(ops_scenario)
+byN = res["byN"]
+maps: Dict[int, Dict[str, float]] = {}
+for _, row in byN.iterrows():
+  n = int(row["N"])
+p_fail = float(row.get("P_Fail", 0.0))
+p_hard = float(row.get("P_Hard", 0.0))
+p_soft = float(row.get("P_Soft", 0.0))
+maps[n] = {
+  "h_fail0": monthly_hazard_from_cycle_prob(p_fail, n),
+  "h_hard0": monthly_hazard_from_cycle_prob(p_hard, n),
+  "h_soft0": monthly_hazard_from_cycle_prob(p_soft, n),
+}
+return maps
+
+
+# -------------------------
+# Severity mapping utilities
+# -------------------------
+
+def loss_from_severity(sev_mean: np.ndarray, impact_mode: str, gamma: np.ndarray) -> np.ndarray:
+  s = np.clip(gamma * np.clip(sev_mean, 0.0, None), 0.0, None)
+if impact_mode == "revenue_loss":
+  return np.minimum(s, 1.0)
+return 1.0 - np.exp(-np.minimum(s, 5.0))
+
+
+def sample_mean_severity_per_sim(rng: np.random.Generator, sev_pool: np.ndarray, counts: np.ndarray) -> np.ndarray:
+  """For each simulation i, sample `counts[i]` severities and return per-sim mean.
+
+    Robust to zero-count entries (including trailing zeros).
+    """
+counts_int = counts.astype(int)
+total = int(counts_int.sum())
+if total <= 0 or sev_pool.size == 0:
+  return np.zeros_like(counts, dtype=float)
+
+draws = rng.choice(sev_pool, size=total, replace=True)
+
+nz = counts_int > 0
+counts_nz = counts_int[nz]
+cs = np.cumsum(counts_nz)
+starts = np.concatenate(([0], cs[:-1]))
+
+sums_nz = np.add.reduceat(draws, starts)
+
+means = np.zeros_like(counts, dtype=float)
+means[nz] = sums_nz / counts_nz
+return means
+
+
+# -------------------------
+# Combined simulation
+# -------------------------
+
+def simulate_combined(cfg: CombinedConfig,
+                      calibrator: PlatformCalibrator,
+                      macro_scenario: str,
+                      ops_scenario: str) -> pd.DataFrame:
+  rng = np.random.default_rng(cfg.seed)
+
+N_vals = np.array(cfg.N_values, dtype=int)
+probs = np.array(cfg.N_probs, dtype=float)
+probs = probs / probs.sum()
+
+n_groups_size = np.floor(cfg.total_groups * probs).astype(int)
+rem = cfg.total_groups - int(n_groups_size.sum())
+if rem > 0:
+  add_idx = np.argsort(-probs)[:rem]
+n_groups_size[add_idx] += 1
+
+alive_groups = np.tile(n_groups_size, (cfg.n_sims, 1)).astype(int)
+arrears = np.zeros(cfg.n_sims, dtype=float)
+users = (alive_groups * N_vals).sum(axis=1).astype(float)
+
+a_pay = logit(min(cfg.p_eff0 / max(cfg.q0_baseline, 1e-6), 0.999999))
+a_q0 = logit(cfg.q0_baseline)
+a_rec = logit(min(cfg.r0 / max(cfg.q0_baseline, 1e-6), 0.999999))
+a_j = logit(cfg.j0)
+
+m_shift = 0.0 if macro_scenario == "baseline" else cfg.macro_shift_adverse
+o_shift = float(cfg.ops_shift_by_regime.get(ops_scenario, 0.0))
+
+size_haz0 = calibrator.get_size_maps(ops_scenario)
+sev_pools = calibrator.run_ops_scenario(ops_scenario)["sev_samples"]
+
+rev_total = np.zeros(cfg.n_sims, dtype=float)
+
+for _ in range(cfg.months):
+  M, O = draw_correlated_normals(rng, cfg.n_sims, cfg.rho_MO, m_shift=m_shift, o_shift=o_shift)
+
+p_user = sigmoid(a_pay + cfg.b_payM * M)
+q_base = sigmoid(a_q0 * np.ones(cfg.n_sims))
+r_base = sigmoid(a_rec - cfg.b_recM * M)
+j = sigmoid(a_j + cfg.b_jM * M)
+
+paid_total = np.zeros(cfg.n_sims, dtype=float)
+miss_total = np.zeros(cfg.n_sims, dtype=float)
+
+for jn, n in enumerate(N_vals):
+  g_alive = alive_groups[:, jn]
+if np.all(g_alive == 0):
+  continue
+
+hz0 = size_haz0.get(int(n), {"h_fail0": 0.0, "h_hard0": 0.0, "h_soft0": 0.0})
+
+scale = np.exp(cfg.kappa_fail_O * O)
+h_fail = np.clip(hz0["h_fail0"] * scale, 0.0, 0.50)
+h_hard = np.clip(hz0["h_hard0"] * scale, 0.0, 0.30)
+h_soft = np.clip(hz0["h_soft0"] * scale, 0.0, 0.40)
+
+g_fail = rng.binomial(g_alive, h_fail)
+g_nonfail = g_alive - g_fail
+
+members_fail = g_fail.astype(float) * float(n)
+members_nonfail = g_nonfail.astype(float) * float(n)
+members_total = members_fail + members_nonfail
+
+sev_pool = sev_pools.get(int(n), np.array([], dtype=float))
+sev_mean = sample_mean_severity_per_sim(rng, sev_pool, g_fail)
+
+gamma_vec = cfg.gamma_impact_to_q * np.exp(cfg.kappa_sev_O * O)
+loss_vec = loss_from_severity(sev_mean, cfg.impact_mode, gamma_vec)
+q_fail_vec = np.clip(1.0 - loss_vec, cfg.q_floor, 1.0)
+
+p_eff_nonfail = np.clip(p_user * q_base, 0.0, 1.0)
+p_eff_fail = np.clip(p_user * q_base * q_fail_vec, 0.0, 1.0)
+
+paid_nonfail = rng.binomial(members_nonfail.astype(int), p_eff_nonfail)
+paid_fail = rng.binomial(members_fail.astype(int), p_eff_fail)
+paid = paid_nonfail + paid_fail
+miss = members_total - paid
+
+paid_total += paid
+miss_total += miss
+
+g_hard = rng.binomial(g_alive, h_hard)
+g_soft = rng.binomial(np.maximum(g_alive - g_hard, 0), h_soft)
+deaths = g_hard + (cfg.soft_to_death_weight * g_soft)
+
+deaths_int = np.floor(deaths).astype(int)
+frac = deaths - deaths_int
+deaths_int += (rng.random(cfg.n_sims) < frac).astype(int)
+deaths_int = np.minimum(deaths_int, g_alive)
+
+alive_groups[:, jn] = g_alive - deaths_int
+
+frac_dead = deaths_int / np.maximum(g_alive, 1)
+arrears *= (1.0 - np.clip(cfg.kappa_arrears_group * frac_dead, 0.0, 1.0))
+
+arrears += miss_total
+
+denom = np.maximum(users * p_user * q_base, 1.0)
+q_eff = np.clip(paid_total / denom, 0.0, 1.0)
+r_eff = np.clip(r_base * q_eff, 0.0, 1.0)
+rec = rng.binomial(np.maximum(arrears, 0).astype(int), r_eff)
+arrears -= rec
+
+cr_users = rng.binomial(np.maximum(users, 0).astype(int), np.clip(j, 0.0, 1.0))
+users = np.maximum(users - cr_users, 0.0)
+share_cr = cr_users / np.maximum(users + cr_users, 1.0)
+arrears *= (1.0 - share_cr)
+
+rev_fee = cfg.tau_take_rate * (paid_total + rec)
+rev_pen = cfg.penalty_lambda * cfg.penalty_realization * miss_total
+rev_total += rev_fee + rev_pen
+
+groups_end = alive_groups.sum(axis=1).astype(float)
+
+return pd.DataFrame({
+  "Macro": macro_scenario,
+  "Ops": ops_scenario,
+  "RevenueTotal": rev_total,
+  "ArrearsEnd": arrears,
+  "GroupsEnd": groups_end,
+  "UsersEnd": users,
+})
+
+
+def summarize(df: pd.DataFrame, baseline_ref: Optional[pd.DataFrame] = None) -> Dict[str, float]:
+  out: Dict[str, float] = {
+    "rev_mean": float(df["RevenueTotal"].mean()),
+    "rev_p50": float(df["RevenueTotal"].quantile(0.50)),
+    "rev_p05": float(df["RevenueTotal"].quantile(0.05)),
+    "arrears_p50": float(df["ArrearsEnd"].quantile(0.50)),
+    "arrears_p95": float(df["ArrearsEnd"].quantile(0.95)),
+    "groups_p50": float(df["GroupsEnd"].quantile(0.50)),
+    "groups_p05": float(df["GroupsEnd"].quantile(0.05)),
+    "users_p50": float(df["UsersEnd"].quantile(0.50)),
+    "users_p05": float(df["UsersEnd"].quantile(0.05)),
+  }
+if baseline_ref is not None:
+  base_med = float(baseline_ref["RevenueTotal"].quantile(0.50))
+out["p_rev_drawdown_20"] = float((df["RevenueTotal"] < 0.80 * base_med).mean())
+out["p_rev_drawdown_40"] = float((df["RevenueTotal"] < 0.60 * base_med).mean())
+out["RaR95_vs_baseMed"] = float(base_med - out["rev_p05"])
+else:
+  out["p_rev_drawdown_20"] = float("nan")
+out["p_rev_drawdown_40"] = float("nan")
+out["RaR95_vs_baseMed"] = float("nan")
+return out
+
+
+def run_suite(cfg: CombinedConfig, calibrator: PlatformCalibrator) -> pd.DataFrame:
+  df_base = simulate_combined(cfg, calibrator, "baseline", "central")
+rows = [{"Macro": "baseline", "Ops": "central", **summarize(df_base, baseline_ref=df_base)}]
+
+for m in MACRO_SCENARIOS:
+  for o in OPS_SCENARIOS:
+  if m == "baseline" and o == "central":
+  continue
+df = simulate_combined(cfg, calibrator, m, o)
+rows.append({"Macro": m, "Ops": o, **summarize(df, baseline_ref=df_base)})
+
+out = pd.DataFrame(rows)
+out.insert(0, "Scenario", out["Macro"] + "__" + out["Ops"])
+return out
+
+
+# -------------------------
+# Interactive
+# -------------------------
+
+def interactive():
+  print("\n=== TRIBUS Combined (v2 FIXED): Correlated Macro–Ops + Tail Severity → Contribution Revenue Risk (C=1) ===\n")
+
+cfg = CombinedConfig()
+
+cfg.n_sims = prompt_int("Number of simulations", cfg.n_sims)
+cfg.months = prompt_int("Horizon (months)", cfg.months)
+cfg.seed = prompt_int("Random seed", cfg.seed)
+
+cfg.total_groups = prompt_int("Total groups in portfolio", cfg.total_groups)
+
+Nv = prompt_str("Group sizes N (comma-separated)", ",".join(map(str, cfg.N_values)))
+Np = prompt_str("Group size probabilities (comma-separated)", ",".join(map(str, cfg.N_probs)))
+N_values = [int(x.strip()) for x in Nv.split(",") if x.strip()]
+N_probs = [float(x.strip()) for x in Np.split(",") if x.strip()]
+if len(N_probs) != len(N_values):
+  raise ValueError("Length of probabilities must match length of sizes")
+s = sum(N_probs)
+N_probs = [p / s for p in N_probs]
+cfg.N_values = tuple(N_values)
+cfg.N_probs = tuple(N_probs)
+
+cfg.tau_take_rate = prompt_float("Take rate tau (e.g., 0.015 = 1.5%)", cfg.tau_take_rate)
+cfg.penalty_lambda = prompt_float("Penalty lambda on MISS (fraction of contribution)", cfg.penalty_lambda)
+cfg.penalty_realization = prompt_float("Penalty realization rate (0-1)", cfg.penalty_realization)
+
+if prompt_bool("Adjust Macro–Ops correlation settings?", True):
+  cfg.rho_MO = prompt_float("Correlation rho between macro shock M and ops shock O", cfg.rho_MO)
+cfg.kappa_fail_O = prompt_float("Ops hazard amplification kappa_fail_O", cfg.kappa_fail_O)
+cfg.kappa_sev_O = prompt_float("Severity amplification kappa_sev_O", cfg.kappa_sev_O)
+
+if prompt_bool("Adjust macro adverse shift?", False):
+  cfg.macro_shift_adverse = prompt_float("Macro adverse shift (mean M)", cfg.macro_shift_adverse)
+
+cfg.impact_mode = prompt_str("Impact mapping mode (economic_loss/revenue_loss)", cfg.impact_mode)
+cfg.gamma_impact_to_q = prompt_float("Severity scaling gamma (TotalImpactPct -> loss)", cfg.gamma_impact_to_q)
+
+cfg.platform_regime = prompt_str("Platform engine regime (existing/public)", cfg.platform_regime).lower()
+cfg.platform_G = prompt_int("Platform engine Monte Carlo groups G (calibration)", cfg.platform_G)
+cfg.platform_seed = prompt_int("Platform engine seed", cfg.platform_seed)
+
+platform_mod = load_platform_engine()
+calibrator = PlatformCalibrator(platform_mod, cfg)
+
+print("\nCalibrating ops regimes from platform stress engine (central/peak_load/major_incident)...\n")
+for o in OPS_SCENARIOS:
+  calibrator.run_ops_scenario(o)
+
+print("Running combined 2x3 suite (macro baseline/adverse x ops central/peak/major)...\n")
+table = run_suite(cfg, calibrator)
+
+pd.set_option('display.max_columns', None)
+print("=== Combined Scenario Summary (Normalized revenue units; multiply by contribution amount to scale) ===")
+print(table.to_string(index=False))
+
+if prompt_bool("Save outputs to CSV?", True):
+  out_file = "tribus_combined_ops_macro_revenue_suite_v2_fixed.csv"
+table.to_csv(out_file, index=False)
+print(f"Saved: {out_file}")
+
+print("\nDone.\n")
+
+
+if __name__ == "__main__":
+  interactive()

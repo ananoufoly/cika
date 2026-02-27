@@ -27,7 +27,7 @@ if "/mnt/data" not in sys.path:
     sys.path.append("/mnt/data")
 
 try:
-    from clcs_sim_v4_8 import CLCSParams, DeterministicScenario, CLCSSimulator
+    from clcs_sim import CLCSParams, DeterministicScenario, CLCSSimulator
 except Exception as e:
     raise ImportError(
         "Cannot import clcs_sim_v4_8. Make sure clcs_sim_v4_8.py is in the same folder."

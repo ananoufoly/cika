@@ -29,7 +29,7 @@ from typing import List, Dict, Tuple
 
 import pandas as pd
 
-from clcs_sim_v4_8 import CLCSParams, DeterministicScenario, CLCSSimulator, pretty_params
+from clcs_sim import CLCSParams, DeterministicScenario, CLCSSimulator, pretty_params
 
 
 def _prompt(msg: str) -> str:
