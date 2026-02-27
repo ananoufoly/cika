@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 
-from clcs_simulator import CLCSParams, CLCSSimulator, DeterministicScenario, pretty_params
+from clcs_simulator import CLCSParams, CLCSSimulator, DeterministicScenario
 from clcs_interactive_runner import (
     parse_cashrun_plan,
     parse_general_shocks,
@@ -9,44 +10,54 @@ from clcs_interactive_runner import (
     parse_p_by_member,
 )
 
-# -------------------------------
-# Parameter schema
-# -------------------------------
 SCHEMA = {
-    "N": ("group", int, 10, "Number of members"),
-    "num_cycles": ("group", int, 2, "Number of cycles"),
-    "vesting_lag": ("group", int, 5, "Vesting lag K"),
+    # Group
+    "N": ("group", int, 10, "Number of members."),
+    "num_cycles": ("group", int, 2, "Number of cycles."),
+    "vesting_lag": ("group", int, 5, "Periods before deferred payouts vest."),
 
-    "c": ("flow", float, 100.0, "Contribution per period"),
-    "gamma": ("flow", float, 0.75, "Immediate payout fraction γ"),
-    "delta": ("flow", float, 0.10, "Deferred payout fraction δ"),
-    "Rb_annual": ("flow", float, 0.042, "Buffer annual interest rate"),
-    "Re_annual": ("flow", float, 0.035, "Escrow annual interest rate"),
-    "periods_per_year": ("flow", int, 12, "Periods per year"),
+    # Cash flow
+    "c": ("flow", float, 100.0, "Contribution per period."),
+    "gamma": ("flow", float, 0.75, "Immediate payout fraction γ."),
+    "delta": ("flow", float, 0.10, "Deferred payout fraction δ."),
+    "Rb_annual": ("flow", float, 0.042, "Buffer interest rate."),
+    "Re_annual": ("flow", float, 0.035, "Escrow interest rate."),
+    "periods_per_year": ("flow", int, 12, "Periods per year."),
 
-    "strict_cashrun": ("rules", bool, True, "Strict cashrun"),
-    "enable_replacement": ("rules", bool, False, "Enable replacement"),
-    "replacement_delay": ("rules", int, 0, "Replacement delay"),
-    "probation_q": ("rules", int, 2, "Probation quarters"),
-    "phi": ("rules", float, 0.0, "Platform fee rate φ"),
-    "shrink_cap": ("rules", float, 2.0, "Arrears shrink cap"),
-    "init_t0_first_cycle": ("rules", bool, True, "Pre-fund at t=0"),
+    # Rules
+    "strict_cashrun": ("rules", bool, True, "Stop immediately if buffer < 0."),
+    "enable_replacement": ("rules", bool, False, "Allow member replacement."),
+    "replacement_delay": ("rules", int, 0, "Delay before replacement."),
+    "probation_q": ("rules", int, 2, "Probation quarters."),
+    "phi": ("rules", float, 0.0, "Platform fee rate."),
+    "shrink_cap": ("rules", float, 2.0, "Max arrears allowed."),
+    "init_t0_first_cycle": ("rules", bool, True, "Pre-fund at t=0."),
 
-    "payment_mode": ("sim", str, "mc_probpay", "Payment mode"),
-    "p_base": ("sim", float, 1.0, "Base payment probability"),
-    "seed": ("sim", int, 42, "Random seed"),
+    # Simulation
+    "payment_mode": ("sim", str, "mc_probpay", "Payment mode."),
+    "p_base": ("sim", float, 1.0, "Base payment probability."),
+    "seed": ("sim", int, 42, "Random seed."),
 
-    "p_by_member": ("shocks", str, "", "id:p, id:p"),
-    "general_shocks": ("shocks", str, "", "t0-t1:mult"),
-    "member_shocks": ("shocks", str, "", "id:t0-t1:p"),
-    "cashrun_plan": ("shocks", str, "", "id:cycle;id:cycle"),
+    # Shocks
+    "p_by_member": ("shocks", str, "", "Override per-member payment probabilities."),
+    "general_shocks": ("shocks", str, "", "Global shocks over time."),
+    "member_shocks": ("shocks", str, "", "Member-specific shocks."),
+    "cashrun_plan": ("shocks", str, "", "Planned cashrun events."),
 }
 
 DEFAULTS = {k: v[2] for k, v in SCHEMA.items()}
 
-# -------------------------------
-# Build CLCSParams
-# -------------------------------
+UI_GROUPS = {
+    "Group structure": ["N", "num_cycles", "vesting_lag"],
+    "Cash flow mechanics": ["c", "gamma", "delta", "Rb_annual", "Re_annual", "periods_per_year"],
+    "Rules & discipline": [
+        "strict_cashrun", "enable_replacement", "replacement_delay",
+        "probation_q", "phi", "shrink_cap", "init_t0_first_cycle",
+    ],
+    "Simulation mode": ["payment_mode", "p_base", "seed"],
+    "Shocks & overrides": ["p_by_member", "general_shocks", "member_shocks", "cashrun_plan"],
+}
+
 def build_params(vals):
     return CLCSParams(
         N=int(vals["N"]),
@@ -74,54 +85,40 @@ def parse_shocks(vals):
     cp = parse_cashrun_plan(vals["cashrun_plan"]) if vals["cashrun_plan"].strip() else None
     return pbm, gs, ms, cp
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
+st.set_page_config(page_title="CLCS Simulator", layout="wide")
 st.title("CLCS Interactive Simulator")
-st.caption("Group cash-flow engine with shocks and overrides")
+
+preset = st.sidebar.selectbox(
+    "Scenario preset",
+    ["Default", "High stress", "Loose discipline", "Strict discipline"]
+)
 
 vals = {}
 
-st.sidebar.header("Parameters")
+for group_name, keys in UI_GROUPS.items():
+    st.sidebar.subheader(group_name)
+    for k in keys:
+        sec, typ, default, desc = SCHEMA[k]
+        v0 = default
+        if preset == "High stress" and k == "p_base":
+            v0 = 0.85
+        if preset == "Loose discipline" and k == "strict_cashrun":
+            v0 = False
+        if preset == "Strict discipline" and k == "shrink_cap":
+            v0 = min(default, 1.0)
 
-sections = ["group", "flow", "rules", "sim", "shocks"]
-section_titles = {
-    "group": "Group Setup",
-    "flow": "Cash Flow",
-    "rules": "Rules",
-    "sim": "Simulation",
-    "shocks": "Shocks & Overrides",
-}
-
-for sec in sections:
-    st.sidebar.subheader(section_titles[sec])
-    for k, (s, typ, default, desc) in SCHEMA.items():
-        if s != sec:
-            continue
         if typ is int:
-            vals[k] = st.sidebar.number_input(k, value=default, step=1)
+            vals[k] = st.sidebar.number_input(k, value=v0, step=1, help=desc)
         elif typ is float:
-            vals[k] = st.sidebar.number_input(k, value=default, step=0.01, format="%.4f")
+            vals[k] = st.sidebar.number_input(k, value=v0, step=0.01, format="%.4f", help=desc)
         elif typ is bool:
-            vals[k] = st.sidebar.checkbox(k, value=default)
+            vals[k] = st.sidebar.checkbox(k, value=v0, help=desc)
         else:
-            vals[k] = st.sidebar.text_input(k, value=default)
+            vals[k] = st.sidebar.text_input(k, value=v0, help=desc)
 
-# -------------------------------
-# Run simulation
-# -------------------------------
 if st.button("Run simulation"):
-    try:
-        p = build_params(vals)
-    except Exception as e:
-        st.error(f"Invalid parameters: {e}")
-        st.stop()
-
-    try:
-        pbm, gs, ms, cp = parse_shocks(vals)
-    except Exception as e:
-        st.error(f"Shock parse error: {e}")
-        st.stop()
+    p = build_params(vals)
+    pbm, gs, ms, cp = parse_shocks(vals)
 
     N = p.N
     total_turns = N * p.num_cycles
@@ -139,14 +136,38 @@ if st.button("Run simulation"):
         cashrun_plan=cp,
     )
 
-    st.subheader("KPI")
+    st.subheader("Key performance indicators")
     st.json(result.kpi)
 
-    st.subheader("Period Data (last 50 rows)")
+    st.subheader("Buffer trajectory")
+    st.line_chart(result.period_df["B_end"])
+
+    st.subheader("Period data (last 50 rows)")
     st.dataframe(result.period_df.tail(50))
 
-    st.subheader("Member Data")
+    st.subheader("Member data")
     st.dataframe(result.member_df)
 
-    st.subheader("Buffer Trajectory")
-    st.line_chart(result.period_df["B_end"])
+with st.expander("Parameter glossary"):
+    st.markdown("""
+**Group structure**  
+- **N**: number of members.  
+- **num_cycles**: number of full rotations.  
+
+**Cash flow mechanics**  
+- **γ**: immediate payout fraction.  
+- **δ**: deferred payout fraction.  
+
+**Rules & discipline**  
+- **strict_cashrun**: stop immediately if buffer < 0.  
+- **shrink_cap**: maximum arrears allowed.  
+
+**Simulation mode**  
+- **p_base**: baseline payment probability.  
+
+**Shocks**  
+- **p_by_member**: override payment probabilities.  
+- **general_shocks**: global shocks.  
+- **member_shocks**: member-specific shocks.  
+- **cashrun_plan**: planned cashrun events.
+""")
