@@ -1,48 +1,23 @@
-"""rosca_score_engine.py
-ROSCA-based credit score simulation engine — population edition.
-
-Design
-------
-Members are NOT pre-labelled.  Each member's behavioural parameters are drawn
-independently from population-level distributions.  A macro environment can
-apply systemic and within-group shocks.  A true PD is derived from the raw
-drawn parameters (the oracle ground truth).  The 5-pillar score is then
-computed from noisy meeting data alone.
-
-This lets us ask: does the score correctly rank real risk, across different
-parameter settings and stress regimes?
-
-Pillars (unchanged from spec)
-------------------------------
-  pdis  — Payment discipline          (max 35)
-  ordr  — Order & post-payout         (max 15)
-  gov   — Governance & enforcement    (max 20)
-  liq   — Liquidity stress (bidding)  (max 15)
-  soc   — Social capital              (max 15)
-  Total score S* ∈ [0, 100]
-
-Usage
------
->>> from rosca_score_engine import (
-...     PopulationParams, MacroEnvironment, ScoreParams,
-...     generate_population, run_sensitivity,
-... )
->>> pop   = PopulationParams(n_groups=20)
->>> macro = MacroEnvironment(stress_level=0.20, within_group_corr=0.30)
->>> params = ScoreParams()
->>> result = generate_population(pop, macro, params, seed=42)
->>> print(result.member_df[["mid", "gid", "true_pd", "score"]].head(20))
->>> print(result.validation)
-"""
+# rosca_score_engine.py
+# Updated: adds explicit default detection, Monte Carlo PD* estimation, and logistic PD* fitting.
+# Keep original functionality intact; new helpers are appended near the end.
 
 from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass, field, fields, replace as dc_replace
 from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 
+import copy
 import numpy as np
 import pandas as pd
+
+# Optional ML dependency for logistic PD* estimator
+try:
+    from sklearn.linear_model import LogisticRegression
+except Exception:  # pragma: no cover - sklearn may be absent in some environments
+    LogisticRegression = None
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +529,7 @@ class SimulationResult:
 
 
 # ---------------------------------------------------------------------------
-# 11. Population generator  (main entry point)
+# 11. Population generator  (main entry point)  -- unchanged
 # ---------------------------------------------------------------------------
 
 def generate_population(
@@ -716,7 +691,217 @@ def generate_population(
 
 
 # ---------------------------------------------------------------------------
-# 12. Parameter sensitivity  (sweeps ScoreParams)
+# 12. New: Default detection and PD* estimation helpers
+# ---------------------------------------------------------------------------
+
+def detect_default_from_meetings(member_meetings: pd.DataFrame, streak_threshold: int = 3) -> bool:
+    """Return True if member misses `streak_threshold` consecutive meetings after their allocation date."""
+    df = member_meetings.sort_values("meeting_no")
+    if df.empty:
+        return False
+    adate = df["adate"].iloc[0]
+    post = df[df["mdate"] > adate]
+    if post.empty:
+        return False
+    consec = 0
+    for v in post["ont"].values:
+        if int(v) == 0:
+            consec += 1
+            if consec >= streak_threshold:
+                return True
+        else:
+            consec = 0
+    return False
+
+
+def generate_population_with_defaults(
+    pop: PopulationParams,
+    macro: MacroEnvironment,
+    params: ScoreParams,
+    seed: int = 42,
+    K_min: int = 6,
+    streak_threshold: int = 3,
+) -> SimulationResult:
+    """Run the standard generate_population and attach a binary 'default' flag per member using the rule:
+    default if the member misses `streak_threshold` consecutive meetings after allocation.
+    """
+    result = generate_population(pop, macro, params, seed=seed, K_min=K_min)
+    meeting_df = result.meeting_df
+    defaults = {}
+    for mid, grp in meeting_df.groupby("mid", sort=False):
+        defaults[mid] = detect_default_from_meetings(grp, streak_threshold=streak_threshold)
+    member_df = result.member_df.copy()
+    member_df["default"] = member_df["mid"].map(defaults).fillna(False).astype(bool)
+    # keep original validation (against latent true_pd) but user can compute PD* externally
+    return SimulationResult(member_df=member_df, meeting_df=meeting_df, validation=result.validation)
+
+
+def draw_population_profiles(
+    pop: PopulationParams,
+    macro: MacroEnvironment,
+    seed: int = 42,
+    K_min: int = 6,
+) -> List[Tuple[str, dict, List[MemberProfile]]]:
+    """Draw groups and member profiles only (no meeting simulation).
+    Returns list of tuples: (gid, group_meta, [MemberProfile,...]).
+    """
+    rng = np.random.default_rng(seed)
+    profiles_by_group = []
+    for g_idx in range(pop.n_groups):
+        gid = f"G{g_idx+1:02d}"
+        n = int(rng.integers(pop.group_size_min, pop.group_size_max + 1))
+        rtype = "bidding" if rng.random() < pop.rtype_bidding_prob else "random"
+        rules = rng.random() < pop.rules_prob
+        san_rate = float(rng.uniform(pop.san_rate_min, pop.san_rate_max))
+        num_cycles = int(rng.integers(pop.num_cycles_min, pop.num_cycles_max + 1))
+        aord_list = list(rng.permutation(n) + 1)
+
+        a_otr, b_otr = pop._beta_params(pop.p_ontime_mean, pop.p_ontime_conc)
+        a_slip, b_slip = pop._beta_params(pop.post_slip_mean, pop.post_slip_conc)
+        a_bid, b_bid   = pop._beta_params(pop.bid_agg_mean, pop.bid_agg_conc)
+
+        group_profiles: List[MemberProfile] = []
+        for m_idx in range(n):
+            mid = f"{gid}_M{m_idx+1:02d}"
+            aord = int(aord_list[m_idx])
+            p_ontime_raw  = float(np.clip(rng.beta(a_otr, b_otr), 0.01, 0.99))
+            dlate_mu      = float(np.clip(rng.lognormal(pop.dlate_lognorm_mu, pop.dlate_lognorm_sigma), 1.0, 60.0))
+            post_slip     = float(np.clip(rng.beta(a_slip, b_slip), 0.0, 1.0))
+            bid_agg       = float(np.clip(rng.beta(a_bid, b_bid), 0.0, 0.99))
+            bid_vol       = float(rng.uniform(pop.bid_vol_min, pop.bid_vol_max))
+            rep   = rng.random() < pop.p_rep
+            cent  = rng.random() < pop.p_cent
+            endf  = rng.random() < pop.p_endf
+            ends  = rng.random() < pop.p_ends
+            r_sure = rng.random()
+            if r_sure < pop.p_sure_none:
+                sure_str = "none"
+            elif r_sure < pop.p_sure_none + pop.p_sure_weak:
+                sure_str = "weak"
+            else:
+                sure_str = "strong"
+
+            profile = MemberProfile(
+                mid=mid, gid=gid, n=n, aord=aord, rtype=rtype,
+                rules=rules, san_rate=san_rate, num_cycles=num_cycles,
+                p_ontime_raw=p_ontime_raw, dlate_mu=dlate_mu,
+                post_slip_prob=post_slip, bid_aggressiveness=bid_agg,
+                bid_volatility=bid_vol,
+                rep=rep, cent=cent, endf=endf, ends=ends, sure_str=sure_str,
+            )
+            profile.true_pd = _compute_true_pd(profile, macro.stress_level, rng)
+            group_profiles.append(profile)
+
+        group_meta = {
+            "gid": gid,
+            "n": n,
+            "rtype": rtype,
+            "rules": rules,
+            "san_rate": san_rate,
+            "num_cycles": num_cycles,
+            "aord_list": aord_list,
+        }
+        profiles_by_group.append((gid, group_meta, group_profiles))
+    return profiles_by_group
+
+
+def compute_pd_star_mc(
+    pop: PopulationParams,
+    macro: MacroEnvironment,
+    params: ScoreParams,
+    n_runs: int = 200,
+    base_seed: int = 42,
+    K_min: int = 6,
+    streak_threshold: int = 3,
+) -> pd.DataFrame:
+    """Estimate PD* by Monte Carlo: draw profiles once, then simulate meetings n_runs times with different seeds.
+    Returns a DataFrame with one row per member profile and columns:
+      mid, gid, p_ontime_raw, true_pd, default_count, pd_star
+    """
+    # draw profiles once
+    profiles_by_group = draw_population_profiles(pop, macro, seed=base_seed, K_min=K_min)
+
+    default_counts = defaultdict(int)
+    member_meta = {}
+
+    base_date = pd.Timestamp("2024-01-01")
+
+    for run in range(n_runs):
+        run_seed = base_seed + 1000 + run
+        all_rows = []
+        for gid, group_meta, group_profiles in profiles_by_group:
+            meetings_per_cycle = max(K_min, group_meta["n"])
+            total_meetings = meetings_per_cycle * group_meta["num_cycles"]
+            # create a run-specific RNG for group shocks (use run_seed + gid hash for variation)
+            rng_group = np.random.default_rng(run_seed + (hash(gid) & 0xFFFF))
+            group_shocks = {m: float(rng_group.standard_normal()) for m in range(1, total_meetings + 1)}
+            # For each profile, create a per-member RNG seeded deterministically from run_seed and mid
+            for profile in group_profiles:
+                rng_member = np.random.default_rng(run_seed + (hash(profile.mid) & 0xFFFF))
+                rows = _generate_member_meetings(profile, macro, group_shocks, rng_member, base_date, K_min)
+                all_rows.extend(rows)
+        meeting_df = pd.DataFrame(all_rows)
+        if meeting_df.empty:
+            continue
+        # detect defaults for this run
+        for mid, grp in meeting_df.groupby("mid", sort=False):
+            if detect_default_from_meetings(grp, streak_threshold=streak_threshold):
+                default_counts[mid] += 1
+        # store member meta on first run
+        if run == 0:
+            for gid, group_meta, group_profiles in profiles_by_group:
+                for p in group_profiles:
+                    member_meta[p.mid] = {"mid": p.mid, "gid": p.gid, "p_ontime_raw": p.p_ontime_raw, "true_pd": p.true_pd}
+
+    rows = []
+    for mid, meta in member_meta.items():
+        count = default_counts.get(mid, 0)
+        rows.append({
+            "mid": mid,
+            "gid": meta["gid"],
+            "p_ontime_raw": meta["p_ontime_raw"],
+            "true_pd": meta["true_pd"],
+            "default_count": int(count),
+            "pd_star": float(count) / float(max(1, n_runs)),
+        })
+    return pd.DataFrame(rows)
+
+
+def fit_logistic_pd_star(
+    stacked_runs_df: pd.DataFrame,
+    feature_cols: Optional[List[str]] = None,
+    min_events: int = 10,
+):
+    """Fit a logistic regression to predict default (binary) from member-level features.
+    `stacked_runs_df` should contain one row per (member × run) with a binary 'default' column.
+    Returns (model, df_with_probs) where df_with_probs contains predicted probabilities 'pd_star_logit'.
+    """
+    if LogisticRegression is None:
+        raise RuntimeError("scikit-learn is required for logistic PD* fitting but is not installed.")
+
+    if feature_cols is None:
+        # prefer score components if present, else fall back to p_ontime_raw and true_pd
+        candidate = ["s_pdis", "s_ordr", "s_gov", "s_liq", "s_soc", "p_ontime_raw", "true_pd"]
+        feature_cols = [c for c in candidate if c in stacked_runs_df.columns]
+        if not feature_cols:
+            raise ValueError("No suitable feature columns found in stacked_runs_df. Provide feature_cols explicitly.")
+
+    df = stacked_runs_df.copy().dropna(subset=["default"])
+    y = df["default"].astype(int).values
+    if len(y) < min_events or y.sum() < 2:
+        raise ValueError("Not enough default events to fit logistic model. Increase MC runs or relax min_events.")
+
+    X = df[feature_cols].astype(float).fillna(0.0).values
+    model = LogisticRegression(max_iter=500)
+    model.fit(X, y)
+    probs = model.predict_proba(X)[:, 1]
+    df_out = df.copy()
+    df_out["pd_star_logit"] = probs
+    return model, df_out
+
+
+# ---------------------------------------------------------------------------
+# 13. Parameter sensitivity  (sweeps ScoreParams)  -- unchanged
 # ---------------------------------------------------------------------------
 
 def run_sensitivity(
@@ -759,7 +944,7 @@ def run_sensitivity(
 
 
 # ---------------------------------------------------------------------------
-# 13. CLI entry point
+# 14. CLI entry point  (unchanged)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
