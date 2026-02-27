@@ -326,16 +326,28 @@ def _finalise(result, mc_df=None):
         merged = logit_member_df
         source = "logistic (score pillars)"
     elif mc_df is not None:
+        st.warning(f"Logistic PD* failed ({err}). Falling back to MC PD*.")
         merged = _merge_mc_pdstar(result, mc_df)
         source = "MC frequency"
     else:
+        st.error(
+            f"**Logistic PD* could not be fitted.**  \n"
+            f"Error: `{err}`  \n"
+            "Check that **scikit-learn** is installed (`pip install scikit-learn`). "
+            "The Score Overview and Benchmark tabs below still show your simulation results."
+        )
         merged = None
         source = None
 
     if merged is not None:
-        pv = compute_pd_star_validation(merged)
-        st.session_state.update({"merged_df": merged, "pdstar_val": pv,
-                                  "pdstar_source": source})
+        try:
+            pv = compute_pd_star_validation(merged)
+            st.session_state.update({"merged_df": merged, "pdstar_val": pv,
+                                      "pdstar_source": source})
+        except Exception as e:
+            st.error(f"PD* validation failed: {e}")
+            st.session_state.update({"merged_df": merged, "pdstar_val": None,
+                                      "pdstar_source": source})
 
 
 # ── Run handlers ──────────────────────────────────────────────────────────────
