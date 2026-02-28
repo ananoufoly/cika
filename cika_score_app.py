@@ -350,6 +350,40 @@ for group_name, keys in UI_GROUPS.items():
             else:
                 vals[k] = st.text_input(label, value=str(v0), help=desc, key=k)
 
+# ── Scale warning ─────────────────────────────────────────────────────────────
+_n_groups_ui = int(vals.get("n_groups", 20))
+_est_members = int(_n_groups_ui * (int(vals.get("group_size_min", 6)) + int(vals.get("group_size_max", 20))) / 2)
+_KEEP_MEETINGS_LIMIT = 500   # above this: skip accumulating full meeting DataFrame
+_MC_WARN_LIMIT       = 5_000 # above this: warn before running MC
+_MC_BLOCK_LIMIT      = 10_000  # above this: disable MC button
+
+# Rough time estimates based on benchmarks (~2.3 ms/member for simulation, ~0.5 ms for MC)
+_est_sim_s  = int(_est_members * 0.0023)
+_est_mc_s   = int(_est_members * 0.0005 * int(vals.get("mc_runs", 200)))
+
+if _n_groups_ui > _MC_BLOCK_LIMIT:
+    st.error(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** — estimated simulation time: "
+        f"**~{_est_sim_s // 60} min {_est_sim_s % 60} s**.  "
+        "MC PD* is disabled above 10,000 groups. "
+        "For large portfolios consider the command-line tool (`rosca_score_gui.py`)."
+    )
+elif _n_groups_ui > _MC_WARN_LIMIT:
+    st.warning(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** — estimated simulation time: "
+        f"**~{_est_sim_s} s**.  MC PD* is disabled above {_MC_BLOCK_LIMIT:,} groups."
+    )
+elif _n_groups_ui > 2_000:
+    st.warning(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** — estimated simulation time: "
+        f"**~{_est_sim_s} s**. Consider using 500–2,000 groups for faster interactive results."
+    )
+elif _n_groups_ui > _KEEP_MEETINGS_LIMIT:
+    st.info(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** (~{_est_sim_s} s) — "
+        "meeting-level data will not be retained to save memory (scores and validation unaffected)."
+    )
+
 # ── Action buttons ────────────────────────────────────────────────────────────
 st.subheader("Run")
 c1, c2, c3 = st.columns(3)
@@ -360,9 +394,12 @@ with c2:
     run_def_btn = st.button("Score + defaults only",
                             help="Simulate scores and apply the default rule. No PD* fitting.")
 with c3:
+    _mc_disabled = _n_groups_ui > _MC_BLOCK_LIMIT
     run_mc_btn  = st.button("Add MC PD* (optional)",
+                            disabled=_mc_disabled,
                             help="Model-free PD* estimate via Monte Carlo re-simulation (slower). "
-                                 "Adds a comparison tab vs the logistic estimate.")
+                                 "Adds a comparison tab vs the logistic estimate. "
+                                 f"Disabled above {_MC_BLOCK_LIMIT:,} groups.")
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for _k, _v in [("last_result", None), ("last_mc", None),
@@ -412,36 +449,45 @@ def _finalise(result, mc_df=None):
 if full_btn:
     pop, macro, params = build_configs(vals)
     streak = int(vals["streak_threshold"])
-    with st.spinner(f"Simulating population + applying default rule (≥{streak} missed meetings → score 0) + fitting logistic PD*…"):
+    _keep = _n_groups_ui <= _KEEP_MEETINGS_LIMIT
+    with st.spinner(f"Simulating {_n_groups_ui:,} groups (~{_est_members:,} members) + default rule + logistic PD*…"):
         result = generate_population_with_defaults(
-            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak)
+            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak,
+            keep_meetings=_keep)
     st.session_state.update({"last_result": result, "last_mc": None,
                               "merged_df": None, "pdstar_val": None})
     _finalise(result)
     n_def = int(result.member_df["defaulted"].sum()) if "defaulted" in result.member_df.columns else "?"
     src   = st.session_state.get("pdstar_source", "?")
     st.success(
-        f"Done — {len(result.member_df)} members, **{n_def} defaulters** zeroed, "
+        f"Done — {len(result.member_df):,} members, **{n_def} defaulters** zeroed, "
         f"PD* fitted via **{src}**."
     )
 
 if run_def_btn:
     pop, macro, params = build_configs(vals)
     streak = int(vals["streak_threshold"])
-    with st.spinner(f"Simulating population (default rule: {streak} missed meetings → score 0)…"):
+    _keep = _n_groups_ui <= _KEEP_MEETINGS_LIMIT
+    with st.spinner(f"Simulating {_n_groups_ui:,} groups (~{_est_members:,} members), default rule: ≥{streak} missed meetings → score 0…"):
         result = generate_population_with_defaults(
-            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak)
+            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak,
+            keep_meetings=_keep)
     st.session_state.update({"last_result": result, "merged_df": None,
                               "pdstar_val": None, "pdstar_source": None})
     _finalise(result)
     n_def = int(result.member_df["defaulted"].sum()) if "defaulted" in result.member_df.columns else "?"
-    st.success(f"Done — {len(result.member_df)} members, **{n_def} defaulters** zeroed.")
+    st.success(f"Done — {len(result.member_df):,} members, **{n_def} defaulters** zeroed.")
 
-if run_mc_btn:
+if run_mc_btn and not _mc_disabled:
     pop, macro, params = build_configs(vals)
     n_runs = int(vals["mc_runs"])
     streak = int(vals["streak_threshold"])
-    with st.spinner(f"Running {n_runs} MC simulations — this takes a moment…"):
+    if _n_groups_ui > _MC_WARN_LIMIT:
+        st.warning(
+            f"Running MC on {_n_groups_ui:,} groups (~{_est_members:,} members) with {n_runs} runs "
+            "may take several minutes. Consider reducing **MC simulations** to 50–100 or lowering n_groups."
+        )
+    with st.spinner(f"Running {n_runs} MC simulations on {_n_groups_ui:,} groups — this takes a moment…"):
         mc_df = compute_pd_star_mc(pop, macro, params,
                                    n_runs=n_runs, base_seed=int(vals["seed"]),
                                    K_min=6, streak_threshold=streak)
