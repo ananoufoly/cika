@@ -25,6 +25,7 @@ from rosca_score_engine import (
     compute_pd_star_mc,
     fit_logistic_pd_star,
     compute_pd_star_validation,
+    check_portfolio_concentration,
 )
 
 try:
@@ -102,6 +103,48 @@ SCHEMA = {
                          "If a member misses this many meetings IN A ROW after getting the pot, their score is set to 0."),
     "mc_runs":          ("pdstar", int,   200, "MC simulations (optional, slow)",
                          "Number of re-simulations used for the optional model-free PD* estimate. More = accurate but slower."),
+    # Guardrails — population prevalence
+    "p_prior_default":    ("pop",   float, 0.10, "% with hidden prior-default history",
+                           "Share of members who have defaulted in another group before but are not disclosing it. "
+                           "Set to 0 to turn this off. Higher = more reputation-scrubbing risk in the portfolio."),
+    "p_payment_verified": ("pop",   float, 0.85, "% payments backed by digital proof",
+                           "Average share of each member's payments that are verifiable (e.g. mobile-money receipt). "
+                           "1.0 = all payments are verified. 0 = nothing is verifiable (pure self-report)."),
+    "p_star_topology":    ("pop",   float, 0.15, "% groups with closed-loop structure",
+                           "Share of groups that are isolated 'star' networks with no external connections — "
+                           "higher fraud risk. Set to 0 to disable. Penalises governance score for those groups."),
+    "p_multi_group":      ("pop",   float, 0.20, "% members in multiple concurrent ROSCAs",
+                           "Share of members who simultaneously belong to another ROSCA group (credit stacking). "
+                           "These members carry cross-group payment obligations that strain their discipline score. "
+                           "Set to 0 to disable."),
+    "n_extra_groups_max": ("pop",   int,   2,    "Max extra concurrent ROSCA groups (stacking cap)",
+                           "Upper bound on how many additional ROSCAs a stacked member can belong to. "
+                           "Each extra group applies a lambda_stack haircut to the payment discipline score."),
+    # Guardrails — portfolio concentration
+    "rho_max":            ("portf", float, 0.15, "Portfolio concentration limit per group",
+                           "Maximum share any single group may hold of all eligible loan candidates. "
+                           "Groups exceeding this share are flagged for approval suspension. 0.15 = 15%."),
+    "score_threshold":    ("portf", float, 40.0, "Eligibility score threshold",
+                           "Minimum score for a member to count as an eligible loan candidate "
+                           "in the portfolio concentration check."),
+    # Guardrails — score penalties
+    "gamma_rep":          ("score", float, 0.30, "Reputation decay for prior defaulters",
+                           "Multiplier applied to the social capital score when a member has a prior-default flag. "
+                           "0 = social score is wiped out entirely. 1 = no penalty (disable the rule)."),
+    "w_unverified":       ("score", float, 1.00, "Trust weight for unverified payments",
+                           "How much to count on-time payments that have no digital proof. "
+                           "1.0 = full trust (ignore verification). 0 = only verified payments count."),
+    "gov_star_penalty":   ("score", float, 0.40, "Governance cut for closed-loop groups",
+                           "Fraction of the governance score removed when a group is flagged as star-topology. "
+                           "0.4 = 40% reduction. 0 = no penalty (disable the rule)."),
+    "lambda_stack":       ("score", float, 0.15, "Credit-stacking haircut per extra group",
+                           "Fraction of the payment discipline score removed for each extra concurrent ROSCA. "
+                           "0.15 = 15% cut per extra group. 0 = no penalty (disable). "
+                           "Applied only to members with extra_groups > 0."),
+    "alpha_macro":        ("score", float, 0.00, "Macro shock absorption (mean reversion)",
+                           "Absorbs systemic shocks: late payments are discounted by this fraction of the group's "
+                           "median lateness that meeting. 0 = no adjustment (default). "
+                           "1 = a member is only penalised for lateness above the group median."),
     # Global
     "seed": ("global", int, 42, "Random seed",
              "Change this number to get a different random population with the same settings."),
@@ -116,9 +159,14 @@ UI_GROUPS = {
                          "bid_agg_mean", "p_rep", "p_cent", "p_endf"],
     "Economic environment": ["stress_level", "within_group_corr"],
     "Default rule": ["streak_threshold"],
+    "Risk guardrails": ["p_prior_default", "p_payment_verified", "p_star_topology",
+                        "p_multi_group", "n_extra_groups_max",
+                        "rho_max", "score_threshold"],
     "Score formula (advanced)": ["a", "c_otr", "k_otr", "a_al", "a_ls", "a_slip",
                                   "k_rules", "a_san", "q0", "k_q", "a_v",
-                                  "w_rep", "w_cent", "w_endf", "w_ends"],
+                                  "w_rep", "w_cent", "w_endf", "w_ends",
+                                  "gamma_rep", "w_unverified", "gov_star_penalty",
+                                  "lambda_stack", "alpha_macro"],
     "Randomness": ["seed"],
     "MC PD* (optional)": ["mc_runs"],
 }
@@ -139,6 +187,11 @@ def build_configs(vals):
         p_rep=float(vals["p_rep"]),
         p_cent=float(vals["p_cent"]),
         p_endf=float(vals["p_endf"]),
+        p_prior_default=float(vals["p_prior_default"]),
+        p_payment_verified=float(vals["p_payment_verified"]),
+        p_star_topology=float(vals["p_star_topology"]),
+        p_multi_group=float(vals["p_multi_group"]),
+        n_extra_groups_max=int(vals["n_extra_groups_max"]),
     )
     macro = MacroEnvironment(
         stress_level=float(vals["stress_level"]),
@@ -666,6 +719,72 @@ with tab_score:
     st.caption("Bottom 10 by score")
     st.dataframe(df.nsmallest(10, "score")[disp_cols], use_container_width=True, hide_index=True)
 
+    # ── Item 4 — Portfolio concentration guardrail ────────────────────────────
+    st.divider()
+    st.subheader("Portfolio concentration guardrail")
+    rho_max_v       = float(vals.get("rho_max", 0.15))
+    score_thresh_v  = float(vals.get("score_threshold", 40.0))
+    st.caption(
+        f"A group is **flagged** when it accounts for more than **{rho_max_v:.0%}** of all eligible "
+        f"candidates (score ≥ {score_thresh_v:.0f}). Flagged groups should have new loan approvals "
+        "paused until concentration falls back below the limit."
+    )
+    try:
+        conc_df = check_portfolio_concentration(
+            df, rho_max=rho_max_v, score_threshold=score_thresh_v
+        )
+        n_flagged = int(conc_df["flagged"].sum())
+        n_eligible_total = int(conc_df["n_eligible"].sum())
+
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            st.metric("Groups flagged", f"{n_flagged} / {len(conc_df)}",
+                      delta="⚠ review required" if n_flagged > 0 else "✓ all within limit",
+                      delta_color="inverse" if n_flagged > 0 else "normal")
+        with cc2:
+            st.metric("Total eligible candidates", n_eligible_total,
+                      help=f"Members with score ≥ {score_thresh_v:.0f}")
+        with cc3:
+            largest_share = float(conc_df["eligible_share"].max()) if len(conc_df) else 0.0
+            st.metric("Largest group share", f"{largest_share:.1%}",
+                      delta="above limit" if largest_share > rho_max_v else "within limit",
+                      delta_color="inverse" if largest_share > rho_max_v else "normal")
+
+        # Colour bar chart: flagged groups in red
+        conc_plot = conc_df.copy()
+        conc_plot["status"] = conc_plot["flagged"].map({True: "Flagged", False: "OK"})
+        conc_bar = (
+            alt.Chart(conc_plot)
+            .mark_bar()
+            .encode(
+                x=alt.X("gid:N", sort="-y", title="Group"),
+                y=alt.Y("eligible_share:Q", title="Share of eligible candidates",
+                        axis=alt.Axis(format=".0%")),
+                color=alt.Color("status:N",
+                                scale=alt.Scale(domain=["Flagged", "OK"],
+                                                range=["#ef4444", "#3b82f6"]),
+                                legend=alt.Legend(title="Status")),
+                tooltip=["gid", "n_members",
+                         alt.Tooltip("n_eligible:Q",     title="Eligible"),
+                         alt.Tooltip("eligible_share:Q", title="Share", format=".1%"),
+                         "flagged"],
+            )
+            .properties(height=260,
+                        title=f"Group share of eligible candidates  ·  limit = {rho_max_v:.0%}")
+        )
+        limit_line = (
+            alt.Chart(pd.DataFrame({"y": [rho_max_v]}))
+            .mark_rule(strokeDash=[4, 2], color="red")
+            .encode(y="y:Q")
+        )
+        st.altair_chart(conc_bar + limit_line, use_container_width=True)
+
+        with st.expander("Full concentration table"):
+            st.dataframe(conc_df, use_container_width=True, hide_index=True)
+
+    except Exception as _ce:
+        st.warning(f"Portfolio concentration check failed: {_ce}")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tab 2 — Benchmark vs true PD (oracle)
@@ -742,4 +861,8 @@ with st.expander("What does each term mean?"):
 | **PD* Quintile Q1–Q5** | Members split into 5 equal groups by PD*. Q1 = lowest risk (should have highest score). Q5 = highest risk (should have lowest score). |
 | **On-time payment rate** | Share of meetings where a member pays on time. The single strongest driver of both the score and default risk. |
 | **Logistic PD*** | A logistic regression is fitted on the 5 score pillars to predict binary default outcomes. The predicted probabilities are PD*. |
+| **Credit stacking** | A member who belongs to multiple ROSCA groups simultaneously carries cross-group payment obligations. Their payment discipline score is reduced by lambda_stack per extra group. |
+| **Portfolio concentration** | A group is flagged when it holds more than rho_max share of all eligible loan candidates. High concentration means a single group default could hit the entire portfolio. |
+| **Prior default** | A member who defaulted in a previous ROSCA but did not disclose it. Detected indirectly via reputation signals; penalises the social capital score. |
+| **Star topology** | A closed-loop group with no external connections, which increases Sybil/fraud risk. Penalises the governance score. |
 """)

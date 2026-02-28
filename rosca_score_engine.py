@@ -81,6 +81,16 @@ class ScoreParams:
     w_cent: float = 4.0
     w_endf: float = 3.0
     w_ends: float = 3.0
+    # guardrails (Items 2 & 3)
+    gamma_rep: float = 0.30        # s_soc multiplier for members with a prior default history
+    w_unverified: float = 1.0      # weight for unverified on-time payments in otr (1=full trust, 0=only verified)
+    gov_star_penalty: float = 0.40 # fraction of s_gov removed for star-topology (closed-loop) groups
+    # Item 5 — relative mean reversion in pdis
+    alpha_macro: float = 0.0       # [0,1] how much group-median lateness absorbs individual penalty
+                                   # 0 = pure absolute (original behaviour), 1 = full relative adjustment
+    # Item 1 — credit stacking / cross-group obligations
+    lambda_stack: float = 0.15     # per-extra-concurrent-group haircut on s_pdis
+                                   # 0 = no penalty; 1 = full payment-discipline wipe per extra group
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +145,15 @@ class PopulationParams:
     p_sure_none: float = 0.40
     p_sure_weak: float = 0.35
     # p_sure_strong = 1 - none - weak
+
+    # ---- guardrails (Items 2 & 3 simulation parameters) -------------------
+    p_prior_default: float = 0.10   # share of members with a hidden prior-default history
+    p_payment_verified: float = 0.85 # population mean share of payments backed by digital proof
+    p_pay_ver_conc: float = 8.0      # Beta concentration for verification rate distribution
+    p_star_topology: float = 0.15   # share of groups with closed-loop star topology
+    # ---- guardrail (Item 1 — credit stacking) ------------------------------
+    p_multi_group: float = 0.20     # share of members with concurrent ROSCA obligations in other groups
+    n_extra_groups_max: int = 2     # maximum number of extra concurrent ROSCA groups a member can hold
 
     def _beta_params(self, mean: float, conc: float) -> Tuple[float, float]:
         mean = float(np.clip(mean, 1e-4, 1 - 1e-4))
@@ -198,6 +217,13 @@ class MemberProfile:
 
     # Oracle true PD (set after drawing)
     true_pd: float = 0.0
+
+    # Guardrail flags (Items 2 & 3)
+    prior_default: bool = False       # member carries a hidden prior-default in another group
+    verification_rate: float = 1.0    # share of this member's payments that are digitally verifiable
+    star_topology: bool = False       # member belongs to a closed-loop star-topology group
+    # Guardrail flag (Item 1)
+    extra_groups: int = 0             # number of other concurrent ROSCA groups this member belongs to
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +361,9 @@ def _generate_member_meetings(
                 bid_flag = 1
                 disc = bid_disc_by_cycle.get(cid, 0.0)
 
+            # Item 3: payment is verified only if on-time AND passes digital-proof check
+            ont_verified = int(ont and (rng.random() < profile.verification_rate))
+
             rows.append({
                 "mid": profile.mid,
                 "gid": profile.gid,
@@ -348,6 +377,7 @@ def _generate_member_meetings(
                 "adate": adate_i,
                 "tdec": tdec,
                 "ont": ont,
+                "ont_verified": ont_verified,
                 "dlate": dlate,
                 "san_flag": san_this,
                 "bid": bid_flag,
@@ -357,6 +387,9 @@ def _generate_member_meetings(
                 "end_f": int(profile.endf),
                 "end_s": int(profile.ends),
                 "sure_str": profile.sure_str,
+                "prior_default": int(profile.prior_default),
+                "star_topology": int(profile.star_topology),
+                "extra_groups": profile.extra_groups,
                 "_n": n,
                 "_p_ontime_raw": profile.p_ontime_raw,
                 "_true_pd": profile.true_pd,
@@ -414,7 +447,22 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams, streak_thresho
     ont_arr   = df["ont"].values.astype(float)
     dlate_arr = df["dlate"].values.astype(float)
 
-    otr = float((w * ont_arr).sum() / W)
+    # Item 5 — relative mean reversion: absorb group-median lateness from individual penalty.
+    # dlate_im* = max(0, dlate_im - alpha_macro * median_dlate_m_group)
+    # alpha_macro=0 → pure absolute (original); alpha_macro=1 → full relative.
+    if params.alpha_macro > 0.0 and "_grp_median_dlate" in df.columns:
+        grp_med = df["_grp_median_dlate"].values.astype(float)
+        dlate_arr = np.maximum(0.0, dlate_arr - params.alpha_macro * grp_med)
+
+    # Item 3 — verification: unverified on-time payments are downweighted by w_unverified.
+    # verified payments always get full weight; late payments are unaffected (already 0).
+    if "ont_verified" in df.columns:
+        ont_ver = df["ont_verified"].values.astype(float)
+        ont_eff = ont_ver + params.w_unverified * np.maximum(0.0, ont_arr - ont_ver)
+    else:
+        ont_eff = ont_arr  # fallback: full trust (backward compatible)
+
+    otr = float((w * ont_eff).sum() / W)
     al  = float((w * np.maximum(0, dlate_arr)).sum() / W)
     ls  = _max_consec_late(ont_arr.astype(int))
     cur = ((dlate_arr > 0) & (dlate_arr < 7)).astype(float)
@@ -470,8 +518,23 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams, streak_thresho
             S_vol  = 6.0 * np.exp(-params.a_v * _log1p_safe(iqr / params.v_ref))
             s_liq  = (15.0 / 12.0) * (S_lvl + S_vol)
 
+    # Item 1 — credit stacking: concurrent ROSCA obligations strain payment discipline
+    extra_groups = int(df["extra_groups"].iloc[0]) if "extra_groups" in df.columns else 0
+    if extra_groups > 0 and params.lambda_stack > 0.0:
+        stack_haircut = max(0.0, 1.0 - params.lambda_stack * extra_groups)
+        s_pdis *= stack_haircut
+
     # soc
     s_soc = params.w_rep * rep + params.w_cent * cent + params.w_endf * end_f + params.w_ends * end_s
+    # Item 2 — reputation decay: prior defaulters have social capital penalised by gamma_rep
+    prior_default = bool(df["prior_default"].iloc[0]) if "prior_default" in df.columns else False
+    if prior_default:
+        s_soc *= params.gamma_rep
+
+    # Item 3 — star topology: closed-loop groups get a governance penalty
+    star_topology = bool(df["star_topology"].iloc[0]) if "star_topology" in df.columns else False
+    if star_topology:
+        s_gov *= (1.0 - params.gov_star_penalty)
 
     score = s_pdis + s_ordr + s_gov + s_liq + s_soc
 
@@ -492,6 +555,9 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams, streak_thresho
         "ls": ls, "rc": round(rc, 4), "slip": slip,
         "bucket": bucket, "san6": san6, "b_ord": b_ord, "tdec": tdec, "K": K,
         "defaulted": _is_default,
+        "prior_default": prior_default,
+        "star_topology": star_topology,
+        "extra_groups": extra_groups,
     }
 
 
@@ -684,6 +750,15 @@ def generate_population(
             )
         mtg["san6"] = san6_vals
 
+        # Item 5 — group median dlate per meeting (for relative mean reversion in pdis)
+        # For each meeting_no, compute the median dlate across all members in the group.
+        grp_median = (
+            mtg.groupby("meeting_no")["dlate"]
+            .median()
+            .rename("_grp_median_dlate")
+        )
+        mtg = mtg.join(grp_median, on="meeting_no")
+
         # Disc quantile rank within group (for liq pillar)
         if rtype == "bidding":
             bid_only         = mtg[mtg["bid"] == 1]
@@ -794,10 +869,13 @@ def draw_population_profiles(
         san_rate = float(rng.uniform(pop.san_rate_min, pop.san_rate_max))
         num_cycles = int(rng.integers(pop.num_cycles_min, pop.num_cycles_max + 1))
         aord_list = list(rng.permutation(n) + 1)
+        # Item 3: star topology is a group-level property
+        star_topology = bool(rng.random() < pop.p_star_topology)
 
         a_otr, b_otr = pop._beta_params(pop.p_ontime_mean, pop.p_ontime_conc)
         a_slip, b_slip = pop._beta_params(pop.post_slip_mean, pop.post_slip_conc)
         a_bid, b_bid   = pop._beta_params(pop.bid_agg_mean, pop.bid_agg_conc)
+        a_ver, b_ver   = pop._beta_params(pop.p_payment_verified, pop.p_pay_ver_conc)
 
         group_profiles: List[MemberProfile] = []
         for m_idx in range(n):
@@ -819,6 +897,15 @@ def draw_population_profiles(
                 sure_str = "weak"
             else:
                 sure_str = "strong"
+            # Item 2: prior default history (hidden)
+            prior_default    = bool(rng.random() < pop.p_prior_default)
+            # Item 3: individual verification rate (share of payments with digital proof)
+            verification_rate = float(np.clip(rng.beta(a_ver, b_ver), 0.0, 1.0))
+            # Item 1: concurrent ROSCA obligations in other groups (credit stacking)
+            extra_groups = (
+                int(rng.integers(1, max(2, pop.n_extra_groups_max + 1)))
+                if rng.random() < pop.p_multi_group else 0
+            )
 
             profile = MemberProfile(
                 mid=mid, gid=gid, n=n, aord=aord, rtype=rtype,
@@ -827,6 +914,10 @@ def draw_population_profiles(
                 post_slip_prob=post_slip, bid_aggressiveness=bid_agg,
                 bid_volatility=bid_vol,
                 rep=rep, cent=cent, endf=endf, ends=ends, sure_str=sure_str,
+                prior_default=prior_default,
+                verification_rate=verification_rate,
+                star_topology=star_topology,
+                extra_groups=extra_groups,
             )
             profile.true_pd = _compute_true_pd(profile, macro.stress_level, rng)
             group_profiles.append(profile)
@@ -947,7 +1038,60 @@ def fit_logistic_pd_star(
 
 
 # ---------------------------------------------------------------------------
-# 13. Parameter sensitivity  (sweeps ScoreParams)  -- unchanged
+# 13. Portfolio concentration guardrail  (Item 4)
+# ---------------------------------------------------------------------------
+
+def check_portfolio_concentration(
+    member_df: pd.DataFrame,
+    rho_max: float = 0.15,
+    score_threshold: float = 40.0,
+) -> pd.DataFrame:
+    """Post-scoring portfolio guardrail: flag groups that dominate loan approvals.
+
+    A group is 'concentrated' when its share of all eligible candidates (score ≥
+    score_threshold) exceeds rho_max.  The lender should pause new approvals for
+    flagged groups until concentration falls below the limit.
+
+    Parameters
+    ----------
+    member_df        : DataFrame with 'gid' and 'score' columns (from generate_population*)
+    rho_max          : maximum acceptable share any single group may hold of total eligibles
+    score_threshold  : minimum score to be counted as an eligible loan candidate
+
+    Returns
+    -------
+    DataFrame with one row per group:
+        gid, n_members, n_eligible, eligible_share, flagged
+    Sorted by eligible_share descending.
+    """
+    if "score" not in member_df.columns or "gid" not in member_df.columns:
+        raise ValueError("member_df must contain 'gid' and 'score' columns.")
+
+    eligible = member_df["score"] >= score_threshold
+    total_eligible = int(eligible.sum())
+
+    rows = []
+    for gid, grp in member_df.groupby("gid"):
+        n_members  = len(grp)
+        n_elig     = int((grp["score"] >= score_threshold).sum())
+        share      = float(n_elig) / max(1, total_eligible)
+        rows.append({
+            "gid":            gid,
+            "n_members":      n_members,
+            "n_eligible":     n_elig,
+            "eligible_share": round(share, 4),
+            "flagged":        share > rho_max,
+        })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("eligible_share", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14. Parameter sensitivity  (sweeps ScoreParams)  -- unchanged
 # ---------------------------------------------------------------------------
 
 def run_sensitivity(
@@ -990,7 +1134,7 @@ def run_sensitivity(
 
 
 # ---------------------------------------------------------------------------
-# 14. CLI entry point  (unchanged)
+# 15. CLI entry point  (unchanged)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
