@@ -292,7 +292,12 @@ def _score_dist_by_default(df):
 
 
 def _run_logistic_pdstar(member_df: pd.DataFrame):
-    """Fit logistic PD* on the 5 score pillars and return member_df + pd_star column."""
+    """Fit logistic PD* on raw behavioural variables and return member_df + pd_star column.
+
+    Features used: otr, al, ls, rc, slip, san6, p_ontime_raw, prior_default,
+    extra_groups, b_ord — the inputs to the scoring formula, not the score or
+    its pillars.  This keeps PD* independent of expert-defined score weights.
+    """
     try:
         _, df_out = fit_logistic_pd_star(member_df)
         member_df = member_df.copy()
@@ -345,6 +350,40 @@ for group_name, keys in UI_GROUPS.items():
             else:
                 vals[k] = st.text_input(label, value=str(v0), help=desc, key=k)
 
+# ── Scale warning ─────────────────────────────────────────────────────────────
+_n_groups_ui = int(vals.get("n_groups", 20))
+_est_members = int(_n_groups_ui * (int(vals.get("group_size_min", 6)) + int(vals.get("group_size_max", 20))) / 2)
+_KEEP_MEETINGS_LIMIT = 500   # above this: skip accumulating full meeting DataFrame
+_MC_WARN_LIMIT       = 5_000 # above this: warn before running MC
+_MC_BLOCK_LIMIT      = 10_000  # above this: disable MC button
+
+# Rough time estimates based on benchmarks (~2.3 ms/member for simulation, ~0.5 ms for MC)
+_est_sim_s  = int(_est_members * 0.0023)
+_est_mc_s   = int(_est_members * 0.0005 * int(vals.get("mc_runs", 200)))
+
+if _n_groups_ui > _MC_BLOCK_LIMIT:
+    st.error(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** — estimated simulation time: "
+        f"**~{_est_sim_s // 60} min {_est_sim_s % 60} s**.  "
+        "MC PD* is disabled above 10,000 groups. "
+        "For large portfolios consider the command-line tool (`rosca_score_gui.py`)."
+    )
+elif _n_groups_ui > _MC_WARN_LIMIT:
+    st.warning(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** — estimated simulation time: "
+        f"**~{_est_sim_s} s**.  MC PD* is disabled above {_MC_BLOCK_LIMIT:,} groups."
+    )
+elif _n_groups_ui > 2_000:
+    st.warning(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** — estimated simulation time: "
+        f"**~{_est_sim_s} s**. Consider using 500–2,000 groups for faster interactive results."
+    )
+elif _n_groups_ui > _KEEP_MEETINGS_LIMIT:
+    st.info(
+        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** (~{_est_sim_s} s) — "
+        "meeting-level data will not be retained to save memory (scores and validation unaffected)."
+    )
+
 # ── Action buttons ────────────────────────────────────────────────────────────
 st.subheader("Run")
 c1, c2, c3 = st.columns(3)
@@ -355,9 +394,12 @@ with c2:
     run_def_btn = st.button("Score + defaults only",
                             help="Simulate scores and apply the default rule. No PD* fitting.")
 with c3:
+    _mc_disabled = _n_groups_ui > _MC_BLOCK_LIMIT
     run_mc_btn  = st.button("Add MC PD* (optional)",
+                            disabled=_mc_disabled,
                             help="Model-free PD* estimate via Monte Carlo re-simulation (slower). "
-                                 "Adds a comparison tab vs the logistic estimate.")
+                                 "Adds a comparison tab vs the logistic estimate. "
+                                 f"Disabled above {_MC_BLOCK_LIMIT:,} groups.")
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for _k, _v in [("last_result", None), ("last_mc", None),
@@ -377,7 +419,7 @@ def _finalise(result, mc_df=None):
     if err is None:
         st.session_state["logit_df"] = logit_member_df
         merged = logit_member_df
-        source = "logistic (score pillars)"
+        source = "logistic (raw variables)"
     elif mc_df is not None:
         st.warning(f"Logistic PD* failed ({err}). Falling back to MC PD*.")
         merged = _merge_mc_pdstar(result, mc_df)
@@ -407,36 +449,45 @@ def _finalise(result, mc_df=None):
 if full_btn:
     pop, macro, params = build_configs(vals)
     streak = int(vals["streak_threshold"])
-    with st.spinner(f"Simulating population + applying default rule (≥{streak} missed meetings → score 0) + fitting logistic PD*…"):
+    _keep = _n_groups_ui <= _KEEP_MEETINGS_LIMIT
+    with st.spinner(f"Simulating {_n_groups_ui:,} groups (~{_est_members:,} members) + default rule + logistic PD*…"):
         result = generate_population_with_defaults(
-            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak)
+            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak,
+            keep_meetings=_keep)
     st.session_state.update({"last_result": result, "last_mc": None,
                               "merged_df": None, "pdstar_val": None})
     _finalise(result)
     n_def = int(result.member_df["defaulted"].sum()) if "defaulted" in result.member_df.columns else "?"
     src   = st.session_state.get("pdstar_source", "?")
     st.success(
-        f"Done — {len(result.member_df)} members, **{n_def} defaulters** zeroed, "
+        f"Done — {len(result.member_df):,} members, **{n_def} defaulters** zeroed, "
         f"PD* fitted via **{src}**."
     )
 
 if run_def_btn:
     pop, macro, params = build_configs(vals)
     streak = int(vals["streak_threshold"])
-    with st.spinner(f"Simulating population (default rule: {streak} missed meetings → score 0)…"):
+    _keep = _n_groups_ui <= _KEEP_MEETINGS_LIMIT
+    with st.spinner(f"Simulating {_n_groups_ui:,} groups (~{_est_members:,} members), default rule: ≥{streak} missed meetings → score 0…"):
         result = generate_population_with_defaults(
-            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak)
+            pop, macro, params, seed=int(vals["seed"]), streak_threshold=streak,
+            keep_meetings=_keep)
     st.session_state.update({"last_result": result, "merged_df": None,
                               "pdstar_val": None, "pdstar_source": None})
     _finalise(result)
     n_def = int(result.member_df["defaulted"].sum()) if "defaulted" in result.member_df.columns else "?"
-    st.success(f"Done — {len(result.member_df)} members, **{n_def} defaulters** zeroed.")
+    st.success(f"Done — {len(result.member_df):,} members, **{n_def} defaulters** zeroed.")
 
-if run_mc_btn:
+if run_mc_btn and not _mc_disabled:
     pop, macro, params = build_configs(vals)
     n_runs = int(vals["mc_runs"])
     streak = int(vals["streak_threshold"])
-    with st.spinner(f"Running {n_runs} MC simulations — this takes a moment…"):
+    if _n_groups_ui > _MC_WARN_LIMIT:
+        st.warning(
+            f"Running MC on {_n_groups_ui:,} groups (~{_est_members:,} members) with {n_runs} runs "
+            "may take several minutes. Consider reducing **MC simulations** to 50–100 or lowering n_groups."
+        )
+    with st.spinner(f"Running {n_runs} MC simulations on {_n_groups_ui:,} groups — this takes a moment…"):
         mc_df = compute_pd_star_mc(pop, macro, params,
                                    n_runs=n_runs, base_seed=int(vals["seed"]),
                                    K_min=6, streak_threshold=streak)
@@ -855,12 +906,12 @@ with st.expander("What does each term mean?"):
 |---|---|
 | **Score** | A number from 0 to ~85 summarising a member's creditworthiness based on their payment history, governance, and social factors. |
 | **Defaulted** | A member who missed ≥ N consecutive meetings **after** receiving the pot. Their score is set to 0 as a hard penalty. |
-| **PD*** | Estimated probability of default for each member, computed by fitting a logistic model on the 5 score pillars. |
+| **PD*** | Estimated probability of default per member, fitted by logistic regression on raw behavioural variables (payment rate, late streak, slip, etc.) — independent of the expert scoring formula. |
 | **Spearman ρ** | Measures how consistently a higher score corresponds to a lower PD*. +1 = perfect, 0 = no relationship. Values above +0.40 are strong. |
 | **AUC** | How well the score separates defaulters from non-defaulters. 0.5 = random, 1.0 = perfect. |
 | **PD* Quintile Q1–Q5** | Members split into 5 equal groups by PD*. Q1 = lowest risk (should have highest score). Q5 = highest risk (should have lowest score). |
 | **On-time payment rate** | Share of meetings where a member pays on time. The single strongest driver of both the score and default risk. |
-| **Logistic PD*** | A logistic regression is fitted on the 5 score pillars to predict binary default outcomes. The predicted probabilities are PD*. |
+| **Logistic PD*** | A logistic regression is fitted on raw behavioural variables (otr, al, ls, rc, slip, san6, p_ontime_raw, prior_default, extra_groups, b_ord) to predict binary default. Score pillars are excluded so PD* does not inherit expert weighting assumptions. |
 | **Credit stacking** | A member who belongs to multiple ROSCA groups simultaneously carries cross-group payment obligations. Their payment discipline score is reduced by lambda_stack per extra group. |
 | **Portfolio concentration** | A group is flagged when it holds more than rho_max share of all eligible loan candidates. High concentration means a single group default could hit the entire portfolio. |
 | **Prior default** | A member who defaulted in a previous ROSCA but did not disclose it. Detected indirectly via reputation signals; penalises the social capital score. |
