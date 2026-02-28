@@ -292,7 +292,12 @@ def _score_dist_by_default(df):
 
 
 def _run_logistic_pdstar(member_df: pd.DataFrame):
-    """Fit logistic PD* on the 5 score pillars and return member_df + pd_star column."""
+    """Fit logistic PD* on raw behavioural variables and return member_df + pd_star column.
+
+    Features used: otr, al, ls, rc, slip, san6, p_ontime_raw, prior_default,
+    extra_groups, b_ord — the inputs to the scoring formula, not the score or
+    its pillars.  This keeps PD* independent of expert-defined score weights.
+    """
     try:
         _, df_out = fit_logistic_pd_star(member_df)
         member_df = member_df.copy()
@@ -377,7 +382,7 @@ def _finalise(result, mc_df=None):
     if err is None:
         st.session_state["logit_df"] = logit_member_df
         merged = logit_member_df
-        source = "logistic (score pillars)"
+        source = "logistic (raw variables)"
     elif mc_df is not None:
         st.warning(f"Logistic PD* failed ({err}). Falling back to MC PD*.")
         merged = _merge_mc_pdstar(result, mc_df)
@@ -855,12 +860,12 @@ with st.expander("What does each term mean?"):
 |---|---|
 | **Score** | A number from 0 to ~85 summarising a member's creditworthiness based on their payment history, governance, and social factors. |
 | **Defaulted** | A member who missed ≥ N consecutive meetings **after** receiving the pot. Their score is set to 0 as a hard penalty. |
-| **PD*** | Estimated probability of default for each member, computed by fitting a logistic model on the 5 score pillars. |
+| **PD*** | Estimated probability of default per member, fitted by logistic regression on raw behavioural variables (payment rate, late streak, slip, etc.) — independent of the expert scoring formula. |
 | **Spearman ρ** | Measures how consistently a higher score corresponds to a lower PD*. +1 = perfect, 0 = no relationship. Values above +0.40 are strong. |
 | **AUC** | How well the score separates defaulters from non-defaulters. 0.5 = random, 1.0 = perfect. |
 | **PD* Quintile Q1–Q5** | Members split into 5 equal groups by PD*. Q1 = lowest risk (should have highest score). Q5 = highest risk (should have lowest score). |
 | **On-time payment rate** | Share of meetings where a member pays on time. The single strongest driver of both the score and default risk. |
-| **Logistic PD*** | A logistic regression is fitted on the 5 score pillars to predict binary default outcomes. The predicted probabilities are PD*. |
+| **Logistic PD*** | A logistic regression is fitted on raw behavioural variables (otr, al, ls, rc, slip, san6, p_ontime_raw, prior_default, extra_groups, b_ord) to predict binary default. Score pillars are excluded so PD* does not inherit expert weighting assumptions. |
 | **Credit stacking** | A member who belongs to multiple ROSCA groups simultaneously carries cross-group payment obligations. Their payment discipline score is reduced by lambda_stack per extra group. |
 | **Portfolio concentration** | A group is flagged when it holds more than rho_max share of all eligible loan candidates. High concentration means a single group default could hit the entire portfolio. |
 | **Prior default** | A member who defaulted in a previous ROSCA but did not disclose it. Detected indirectly via reputation signals; penalises the social capital score. |

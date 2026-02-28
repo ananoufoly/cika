@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c \"import plotly; print\\(''plotly'', plotly.__version__\\)\")",
+      "Bash(.venv/bin/pip install \"plotly>=5.24.0\" -q)",
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\(''liquidity_scheme_app.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")"
+    ]
+  }
+}

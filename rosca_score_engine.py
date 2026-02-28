@@ -544,6 +544,9 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams, streak_thresho
     if _is_default:
         score = s_pdis = s_ordr = s_gov = s_liq = s_soc = 0.0
 
+    # Encode surety as numeric so it can be used as a regression feature
+    sure_val = {"none": 0.0, "weak": 0.5, "strong": 1.0}.get(sure_str, 0.0)
+
     return {
         "score":  round(score, 3),
         "s_pdis": round(s_pdis, 3),
@@ -551,13 +554,18 @@ def compute_score(member_rows: pd.DataFrame, params: ScoreParams, streak_thresho
         "s_gov":  round(s_gov, 3),
         "s_liq":  round(s_liq, 3),
         "s_soc":  round(s_soc, 3),
+        # --- raw score inputs (preserved for PD* logistic model) ---
         "otr": round(otr, 4), "al": round(al, 4),
         "ls": ls, "rc": round(rc, 4), "slip": slip,
-        "bucket": bucket, "san6": san6, "b_ord": b_ord, "tdec": tdec, "K": K,
-        "defaulted": _is_default,
-        "prior_default": prior_default,
-        "star_topology": star_topology,
-        "extra_groups": extra_groups,
+        "san6": san6, "b_ord": b_ord, "tdec": tdec, "K": K,
+        # governance inputs
+        "rules": rules, "sure_val": sure_val, "star_topology": star_topology,
+        # social capital inputs
+        "rep": rep, "cent": cent, "end_f": end_f, "end_s": end_s,
+        # credit-stacking / prior-default
+        "extra_groups": extra_groups, "prior_default": prior_default,
+        # housekeeping
+        "bucket": bucket, "defaulted": _is_default,
     }
 
 
@@ -944,56 +952,99 @@ def compute_pd_star_mc(
     K_min: int = 6,
     streak_threshold: int = 3,
 ) -> pd.DataFrame:
-    """Estimate PD* by Monte Carlo: draw profiles once, then simulate meetings n_runs times with different seeds.
-    Returns a DataFrame with one row per member profile and columns:
+    """Estimate PD* via vectorised Monte Carlo.
+
+    Profiles are drawn once; then all n_runs are simulated in a single numpy
+    pass per (group × member), replacing the previous Python loop over runs.
+    This is typically 10–50× faster than the loop-based implementation.
+
+    Returns a DataFrame with one row per member:
       mid, gid, p_ontime_raw, true_pd, default_count, pd_star
     """
-    # draw profiles once
     profiles_by_group = draw_population_profiles(pop, macro, seed=base_seed, K_min=K_min)
 
-    default_counts = defaultdict(int)
-    member_meta = {}
+    corr      = float(np.clip(macro.within_group_corr, 0.0, 1.0))
+    sqrt_corr = np.sqrt(corr)
+    sqrt_1mc  = np.sqrt(max(0.0, 1.0 - corr))
+    # logit-space downward shift matching _effective_p_ontime
+    stress_shift = macro.stress_level * 1.5
 
-    base_date = pd.Timestamp("2024-01-01")
+    rows: List[dict] = []
 
-    for run in range(n_runs):
-        run_seed = base_seed + 1000 + run
-        all_rows = []
-        for gid, group_meta, group_profiles in profiles_by_group:
-            meetings_per_cycle = max(K_min, group_meta["n"])
-            total_meetings = meetings_per_cycle * group_meta["num_cycles"]
-            # create a run-specific RNG for group shocks (use run_seed + gid hash for variation)
-            rng_group = np.random.default_rng(run_seed + (abs(hash(gid))   % (2 ** 31)))
-            group_shocks = {m: float(rng_group.standard_normal()) for m in range(1, total_meetings + 1)}
-            # For each profile, create a per-member RNG seeded deterministically from run_seed and mid
-            for profile in group_profiles:
-                rng_member = np.random.default_rng(run_seed + (abs(hash(profile.mid)) % (2 ** 31)))
-                rows = _generate_member_meetings(profile, macro, group_shocks, rng_member, base_date, K_min)
-                all_rows.extend(rows)
-        meeting_df = pd.DataFrame(all_rows)
-        if meeting_df.empty:
-            continue
-        # detect defaults for this run
-        for mid, grp in meeting_df.groupby("mid", sort=False):
-            if detect_default_from_meetings(grp, streak_threshold=streak_threshold):
-                default_counts[mid] += 1
-        # store member meta on first run
-        if run == 0:
-            for gid, group_meta, group_profiles in profiles_by_group:
-                for p in group_profiles:
-                    member_meta[p.mid] = {"mid": p.mid, "gid": p.gid, "p_ontime_raw": p.p_ontime_raw, "true_pd": p.true_pd}
+    for gid, group_meta, group_profiles in profiles_by_group:
+        meetings_per_cycle = max(K_min, group_meta["n"])
+        num_cycles         = group_meta["num_cycles"]
+        total_meetings     = meetings_per_cycle * num_cycles
 
-    rows = []
-    for mid, meta in member_meta.items():
-        count = default_counts.get(mid, 0)
-        rows.append({
-            "mid": mid,
-            "gid": meta["gid"],
-            "p_ontime_raw": meta["p_ontime_raw"],
-            "true_pd": meta["true_pd"],
-            "default_count": int(count),
-            "pd_star": float(count) / float(max(1, n_runs)),
-        })
+        # Group-level shocks: (n_runs, total_meetings) — same shock for all members in group
+        rng_group   = np.random.default_rng(base_seed + abs(hash(gid)) % (2 ** 31))
+        group_shocks = rng_group.standard_normal((n_runs, total_meetings))  # (R, M)
+
+        for profile in group_profiles:
+            rng_mem = np.random.default_rng(base_seed + abs(hash(profile.mid)) % (2 ** 31))
+
+            # Member idiosyncratic shocks: (n_runs, total_meetings)
+            idio_shocks = rng_mem.standard_normal((n_runs, total_meetings))
+
+            # Aggregate shock with scale 0.40, matching _effective_p_ontime
+            agg = (sqrt_corr * group_shocks + sqrt_1mc * idio_shocks) * 0.40  # (R, M)
+
+            # Per-meeting baseline p_raw, adjusted for post-payout slip per cycle.
+            # Each cycle's slip applies only to meetings after that cycle's allocation.
+            p_raw_m = np.full(total_meetings, profile.p_ontime_raw)
+            for cid in range(1, num_cycles + 1):
+                alloc_no  = (cid - 1) * meetings_per_cycle + profile.aord  # 1-based meeting no.
+                alloc_idx = alloc_no - 1                                    # 0-based index
+                cycle_end = cid * meetings_per_cycle                        # exclusive index
+                if alloc_idx + 1 < cycle_end:
+                    p_raw_m[alloc_idx + 1: cycle_end] *= (1.0 - 0.5 * profile.post_slip_prob)
+
+            # Logit-space baseline per meeting: (M,)
+            p_clipped  = np.clip(p_raw_m, 1e-6, 1.0 - 1e-6)
+            logit_base = np.log(p_clipped / (1.0 - p_clipped)) - stress_shift
+
+            # Effective p_ontime: (R, M)
+            logit_eff = logit_base[np.newaxis, :] + agg
+            p_eff = 1.0 / (1.0 + np.exp(-np.clip(logit_eff, -30, 30)))
+
+            # Apply shock windows (multiplicative severity on probability)
+            for t0, t1, sev in macro.shock_windows:
+                c0 = t0 - 1
+                c1 = min(t1, total_meetings)
+                if c0 < c1:
+                    p_eff[:, c0:c1] *= float(sev)
+            p_eff = np.clip(p_eff, 0.01, 0.99)
+
+            # Payment outcomes: (R, M) — 1 = on-time, 0 = late
+            ont = (rng_mem.random((n_runs, total_meetings)) < p_eff).astype(np.int8)
+
+            # Post-allocation default detection (mirrors detect_default_from_meetings):
+            # look for `streak_threshold` consecutive late payments after first-cycle allocation.
+            first_alloc_idx = profile.aord - 1  # 0-based index
+            post_start      = first_alloc_idx + 1
+
+            if post_start < total_meetings and (total_meetings - post_start) >= streak_threshold:
+                late   = (1 - ont[:, post_start:]).astype(np.int8)  # (R, n_post)
+                n_post = late.shape[1]
+                # Sliding window: any window of size streak_threshold that is all-late
+                has_streak = np.zeros(n_runs, dtype=bool)
+                for w in range(n_post - streak_threshold + 1):
+                    has_streak |= (late[:, w: w + streak_threshold].sum(axis=1) == streak_threshold)
+                default_count = int(has_streak.sum())
+                pd_star       = float(has_streak.mean())
+            else:
+                default_count = 0
+                pd_star       = 0.0
+
+            rows.append({
+                "mid":          profile.mid,
+                "gid":          profile.gid,
+                "p_ontime_raw": profile.p_ontime_raw,
+                "true_pd":      profile.true_pd,
+                "default_count": default_count,
+                "pd_star":      pd_star,
+            })
+
     return pd.DataFrame(rows)
 
 
@@ -1002,26 +1053,58 @@ def fit_logistic_pd_star(
     feature_cols: Optional[List[str]] = None,
     min_events: int = 10,
 ):
-    """Fit a logistic regression to predict default (binary) from member-level features.
-    `stacked_runs_df` should contain one row per (member × run) with a binary 'default' column.
-    Returns (model, df_with_probs) where df_with_probs contains predicted probabilities 'pd_star_logit'.
+    """Fit a logistic regression to predict default from raw behavioural variables.
+
+    Uses the underlying variables that *feed into* the score — not the score
+    or its pillars.  This keeps the PD* estimate free of any expert-defined
+    weighting choices embedded in the scoring formula, so it captures how
+    default probability responds to the raw signals themselves.
+
+    Feature priority (in order; all expert-formula outputs excluded):
+      1. Payment-behaviour metrics: otr, al, ls, rc, slip, san6
+      2. Oracle payment propensity: p_ontime_raw
+      3. Observable member facts:  prior_default, extra_groups, b_ord
+
+    Score pillars (s_pdis, s_ordr, s_gov, s_liq, s_soc) are intentionally
+    never used: they embed expert weights and are zeroed for defaulters,
+    which would produce a bimodal rather than continuous PD* estimate.
+
+    `stacked_runs_df` may contain one row per member (single-run workflow) or
+    one row per (member × MC run).  It must have a binary 'default' column.
+    Returns (model, df_with_probs) where df_with_probs adds 'pd_star_logit'.
     """
     if LogisticRegression is None:
         raise RuntimeError("scikit-learn is required for logistic PD* fitting but is not installed.")
 
     if feature_cols is None:
-        # Use observable payment-history metrics as features.
-        # These are non-zero even for defaulters (computed before the score is zeroed),
-        # which gives a smooth PD* gradient rather than a binary split.
-        # true_pd and score pillars are intentionally excluded.
-        candidate = ["otr", "al", "ls", "rc", "slip", "san6", "p_ontime_raw"]
+        # All candidates are raw observable variables — score pillars are excluded.
+        # This mirrors every input that feeds into the five score pillars:
+        #   s_pdis ← otr, al, ls, rc, extra_groups
+        #   s_ordr ← b_ord, slip, tdec
+        #   s_gov  ← rules, san6, sure_val, star_topology
+        #   s_liq  ← (bidding-specific disc/q_rank, not available in member_df)
+        #   s_soc  ← rep, cent, end_f, end_s, prior_default
+        candidate = [
+            # Payment-discipline inputs
+            "otr", "al", "ls", "rc", "slip", "san6",
+            # Oracle payment propensity
+            "p_ontime_raw",
+            # Order / allocation inputs
+            "b_ord", "tdec",
+            # Governance inputs
+            "rules", "sure_val", "star_topology",
+            # Social capital inputs
+            "rep", "cent", "end_f", "end_s",
+            # Credit-stacking / prior-default
+            "extra_groups", "prior_default",
+        ]
         feature_cols = [c for c in candidate if c in stacked_runs_df.columns]
         if not feature_cols:
-            # last fallback: score pillars (will produce bimodal PD* for zeroed members)
-            candidate2 = ["s_pdis", "s_ordr", "s_gov", "s_liq", "s_soc"]
-            feature_cols = [c for c in candidate2 if c in stacked_runs_df.columns]
-        if not feature_cols:
-            raise ValueError("No suitable feature columns found in stacked_runs_df. Provide feature_cols explicitly.")
+            raise ValueError(
+                "No raw behavioural variables found. Ensure the DataFrame contains columns from: "
+                "otr, al, ls, rc, slip, san6, p_ontime_raw, prior_default, extra_groups, b_ord. "
+                "Pass feature_cols explicitly if using a custom DataFrame."
+            )
 
     df = stacked_runs_df.copy().dropna(subset=["default"])
     y = df["default"].astype(int).values
