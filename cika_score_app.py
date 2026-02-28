@@ -1,6 +1,6 @@
 # cika_score_app.py
 """
-CIKA — ROSCA Credit Score Simulator
+CIKA — Credit Score Simulator
 Streamlit app: simulate, score, estimate default risk (PD*), and validate.
 
 Primary workflow (fast):
@@ -258,8 +258,8 @@ def _merge_mc_pdstar(result, mc_df):
 
 
 # ── Page layout ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="CIKA — ROSCA Score", layout="wide")
-st.title("CIKA — ROSCA Credit Score")
+st.set_page_config(page_title="CIKA — Score", layout="wide")
+st.title("CIKA — Credit Score")
 st.caption(
     "Scores savings-group members on 5 pillars (payment discipline, allocation order, "
     "governance, liquidity, social capital). Members who miss payments consistently "
