@@ -427,191 +427,183 @@ with tab_pdstar:
             "PD* not yet estimated. Run **Full analysis** — it fits a logistic model "
             "in seconds and produces all the results below."
         )
-        st.stop()
+    else:
+        rho    = pv["spearman_rho_pdstar"]
+        sep    = pv["score_separation_pdstar"]
+        n_def  = pv.get("n_defaulted")
+        def_rt = pv.get("default_rate")
+        sc_d   = pv.get("score_mean_defaulted")
+        sc_nd  = pv.get("score_mean_non_defaulted")
 
-    rho    = pv["spearman_rho_pdstar"]
-    sep    = pv["score_separation_pdstar"]
-    n_def  = pv.get("n_defaulted")
-    def_rt = pv.get("default_rate")
-    sc_d   = pv.get("score_mean_defaulted")
-    sc_nd  = pv.get("score_mean_non_defaulted")
+        st.caption(f"PD* source: **{source}**  ·  "
+                   "PD* = estimated probability of default per member  ·  "
+                   "Score should rank members opposite to PD*.")
 
-    st.caption(f"PD* source: **{source}**  ·  "
-               "PD* = estimated probability of default per member  ·  "
-               "Score should rank members opposite to PD*.")
-
-    # ── Headline metrics ──────────────────────────────────────────────────────
-    st.subheader("How well does the score predict default risk?")
-    m1, m2, m3, m4 = st.columns(4)
-    rho_delta = "🟢 strong" if rho >= 0.40 else ("🟡 moderate" if rho >= 0.20 else "🔴 weak")
-    with m1:
-        st.metric(
-            "Spearman ρ  (score vs 1 − PD*)",
-            f"{rho:+.4f}",
-            delta=rho_delta,
-            help="Rank correlation: how consistently does a higher score correspond to lower PD*? "
-                 "Values above +0.40 are strong. Values near 0 mean the score doesn't rank risk.",
-        )
-    with m2:
-        st.metric(
-            "Score gap  (non-defaulter − defaulter)",
-            f"{sep:+.2f} pts",
-            help="Average score of non-defaulters minus average score of defaulters. "
-                 "A large positive gap means the score clearly separates the two groups.",
-        )
-    with m3:
-        if n_def is not None:
+        # ── Headline metrics ──────────────────────────────────────────────────────
+        st.subheader("How well does the score predict default risk?")
+        m1, m2, m3, m4 = st.columns(4)
+        rho_delta = "🟢 strong" if rho >= 0.40 else ("🟡 moderate" if rho >= 0.20 else "🔴 weak")
+        with m1:
             st.metric(
-                "Members scored 0  (defaulted)",
-                f"{n_def}  out of {pv['n_members']}",
-                delta=f"{def_rt:.1%} default rate",
-                help="Members who triggered the post-payout default rule "
-                     "(missed ≥ N consecutive meetings after receiving the pot).",
+                "Spearman ρ  (score vs 1 − PD*)",
+                f"{rho:+.4f}",
+                delta=rho_delta,
+                help="Rank correlation: how consistently does a higher score correspond to lower PD*? "
+                     "Values above +0.40 are strong. Values near 0 mean the score doesn't rank risk.",
             )
-    with m4:
-        if sc_d is not None and sc_nd is not None:
+        with m2:
             st.metric(
-                "Avg score: non-defaulted / defaulted",
-                f"{sc_nd:.1f}  /  {sc_d:.1f}",
-                help="Mean score in each group. "
-                     "Defaulters should cluster near 0.",
+                "Score gap  (non-defaulter − defaulter)",
+                f"{sep:+.2f} pts",
+                help="Average score of non-defaulters minus average score of defaulters. "
+                     "A large positive gap means the score clearly separates the two groups.",
             )
+        with m3:
+            if n_def is not None:
+                st.metric(
+                    "Members scored 0  (defaulted)",
+                    f"{n_def}  out of {pv['n_members']}",
+                    delta=f"{def_rt:.1%} default rate",
+                    help="Members who triggered the post-payout default rule "
+                         "(missed ≥ N consecutive meetings after receiving the pot).",
+                )
+        with m4:
+            if sc_d is not None and sc_nd is not None:
+                st.metric(
+                    "Avg score: non-defaulted / defaulted",
+                    f"{sc_nd:.1f}  /  {sc_d:.1f}",
+                    help="Mean score in each group. "
+                         "Defaulters should cluster near 0.",
+                )
 
-    # AUC / Brier
-    if SKLEARN and "defaulted" in merged.columns:
-        try:
-            y_true  = merged["defaulted"].astype(int).values
-            y_score = merged["score"].values.astype(float)
-            smin, smax = y_score.min(), y_score.max()
-            y_norm = (y_score - smin) / (smax - smin + 1e-9)
-            auc   = roc_auc_score(y_true, y_norm) if y_true.sum() > 0 else float("nan")
-            brier = brier_score_loss(y_true, y_norm)
-            a1, a2, a3 = st.columns(3)
-            auc_d = "🟢 good" if auc >= 0.70 else ("🟡 moderate" if auc >= 0.60 else "🔴 low")
-            with a1:
-                st.metric("AUC  (score separates defaulters)", f"{auc:.4f}", delta=auc_d,
-                          help="Area under the ROC curve. "
-                               "0.5 = random, 1.0 = perfect separation. Target: > 0.70.")
-            with a2:
-                st.metric("Brier score  (lower = better)", f"{brier:.4f}",
-                          help="Mean squared error between normalised score and binary default label. "
-                               "0 = perfect, 0.25 = random.")
-            with a3:
-                st.metric("Members in analysis", pv["n_members"])
-        except Exception:
-            pass
+        # AUC / Brier
+        if SKLEARN and "defaulted" in merged.columns:
+            try:
+                y_true  = merged["defaulted"].astype(int).values
+                y_score = merged["score"].values.astype(float)
+                smin, smax = y_score.min(), y_score.max()
+                y_norm = (y_score - smin) / (smax - smin + 1e-9)
+                auc   = roc_auc_score(y_true, y_norm) if y_true.sum() > 0 else float("nan")
+                brier = brier_score_loss(y_true, y_norm)
+                a1, a2, a3 = st.columns(3)
+                auc_d = "🟢 good" if auc >= 0.70 else ("🟡 moderate" if auc >= 0.60 else "🔴 low")
+                with a1:
+                    st.metric("AUC  (score separates defaulters)", f"{auc:.4f}", delta=auc_d,
+                              help="Area under the ROC curve. "
+                                   "0.5 = random, 1.0 = perfect separation. Target: > 0.70.")
+                with a2:
+                    st.metric("Brier score  (lower = better)", f"{brier:.4f}",
+                              help="Mean squared error between normalised score and binary default label. "
+                                   "0 = perfect, 0.25 = random.")
+                with a3:
+                    st.metric("Members in analysis", pv["n_members"])
+            except Exception:
+                pass
 
-    st.divider()
-
-    # ── Score by PD* quintile ─────────────────────────────────────────────────
-    st.subheader("Score by PD* quintile")
-    st.caption(
-        "Members are sorted into 5 equal groups by PD* (estimated default probability). "
-        "Q1 = safest (lowest PD*),  Q5 = riskiest (highest PD*). "
-        "The score should fall steadily from Q1 to Q5."
-    )
-    qt_df = pv["score_by_pdstar_quintile"]
-    qa, qb = st.columns([3, 2])
-    with qa:
-        st.altair_chart(_quintile_bar(qt_df), use_container_width=True)
-    with qb:
-        qt_show = qt_df.reset_index().copy()
-        qt_show.columns = ["PD* Quintile", "Mean Score", "Std", "Members"]
-        st.dataframe(qt_show, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # ── Scatter + distribution ────────────────────────────────────────────────
-    s1, s2 = st.columns(2)
-    with s1:
-        st.altair_chart(_scatter_score_pdstar(merged), use_container_width=True)
-    with s2:
-        st.altair_chart(_score_dist_by_default(merged), use_container_width=True)
-
-    # ── PD* histogram ─────────────────────────────────────────────────────────
-    with st.expander("PD* distribution"):
-        st.caption("Distribution of estimated default probabilities across all members.")
-        st.altair_chart(
-            _hist(merged, "pd_star", bins=30,
-                  title=f"PD* histogram  ·  mean = {pv['pd_star_mean']:.4f}"),
-            use_container_width=True,
-        )
-
-    # ── Logistic vs MC comparison (shown when both are available) ─────────────
-    logit_df = st.session_state.get("logit_df")
-    mc_state = st.session_state.get("last_mc")
-    result_s = st.session_state.get("last_result")
-
-    if logit_df is not None and mc_state is not None and result_s is not None:
         st.divider()
-        st.subheader("Diagnostic: Logistic PD* vs MC PD*")
+
+        # ── Score by PD* quintile ─────────────────────────────────────────────────
+        st.subheader("Score by PD* quintile")
         st.caption(
-            "Comparing the two PD* estimation methods for the same population. "
-            "They should agree closely — high correlation confirms the logistic model is reliable."
+            "Members are sorted into 5 equal groups by PD* (estimated default probability). "
+            "Q1 = safest (lowest PD*),  Q5 = riskiest (highest PD*). "
+            "The score should fall steadily from Q1 to Q5."
         )
+        qt_df = pv["score_by_pdstar_quintile"]
+        qa, qb = st.columns([3, 2])
+        with qa:
+            st.altair_chart(_quintile_bar(qt_df), use_container_width=True)
+        with qb:
+            qt_show = qt_df.reset_index().copy()
+            qt_show.columns = ["PD* Quintile", "Mean Score", "Std", "Members"]
+            st.dataframe(qt_show, use_container_width=True, hide_index=True)
 
-        # Build comparison dataframe
-        mc_map = mc_state.set_index("mid")["pd_star"].to_dict()
-        comp_df = logit_df[["mid", "gid", "score", "defaulted", "pd_star"]
-                            if "defaulted" in logit_df.columns
-                            else ["mid", "gid", "score", "pd_star"]].copy()
-        comp_df = comp_df.rename(columns={"pd_star": "pd_star_logit"})
-        comp_df["pd_star_mc"] = comp_df["mid"].map(mc_map)
-        comp_df = comp_df.dropna(subset=["pd_star_mc"])
+        st.divider()
 
-        if not comp_df.empty:
-            # Compute cross-method metrics
-            from rosca_score_engine import _spearman as _sp
-            rho_ll = _sp(comp_df["pd_star_logit"].values,
-                         comp_df["pd_star_mc"].values)
-            mean_diff = float((comp_df["pd_star_logit"] - comp_df["pd_star_mc"]).abs().mean())
+        # ── Scatter + distribution ────────────────────────────────────────────────
+        s1, s2 = st.columns(2)
+        with s1:
+            st.altair_chart(_scatter_score_pdstar(merged), use_container_width=True)
+        with s2:
+            st.altair_chart(_score_dist_by_default(merged), use_container_width=True)
 
-            x1, x2, x3 = st.columns(3)
-            with x1:
-                c = "🟢 high agreement" if rho_ll >= 0.70 else ("🟡 moderate" if rho_ll >= 0.40 else "🔴 diverge")
-                st.metric("Spearman ρ  (logistic vs MC)", f"{rho_ll:+.4f}", delta=c,
-                          help="How well the two PD* methods agree on member ranking. "
-                               "High = logistic is a reliable proxy for MC.")
-            with x2:
-                st.metric("Mean absolute difference", f"{mean_diff:.4f}",
-                          help="Average absolute gap between logistic PD* and MC PD* per member.")
-            with x3:
-                st.metric("Members compared", len(comp_df))
-
-            # Scatter: logistic PD* vs MC PD*
-            scat = (
-                alt.Chart(comp_df)
-                .mark_circle(opacity=0.5, size=40)
-                .encode(
-                    x=alt.X("pd_star_mc:Q",    title="MC PD* (model-free)",    scale=alt.Scale(domain=[0, 1])),
-                    y=alt.Y("pd_star_logit:Q",  title="Logistic PD* (fitted)",  scale=alt.Scale(domain=[0, 1])),
-                    tooltip=["mid", "gid",
-                             alt.Tooltip("pd_star_logit:Q", format=".3f"),
-                             alt.Tooltip("pd_star_mc:Q",    format=".3f"),
-                             alt.Tooltip("score:Q",         format=".1f")],
-                )
-                .properties(height=340,
-                            title="Logistic PD* vs MC PD*  ·  diagonal = perfect agreement")
+        # ── PD* histogram ─────────────────────────────────────────────────────────
+        with st.expander("PD* distribution"):
+            st.caption("Distribution of estimated default probabilities across all members.")
+            st.altair_chart(
+                _hist(merged, "pd_star", bins=30,
+                      title=f"PD* histogram  ·  mean = {pv['pd_star_mean']:.4f}"),
+                use_container_width=True,
             )
-            # Diagonal reference line
-            diag = (alt.Chart(pd.DataFrame({"x": [0, 1]}))
-                    .mark_line(strokeDash=[4, 2], color="gray")
-                    .encode(x="x:Q", y="x:Q"))
-            st.altair_chart(scat + diag, use_container_width=True)
 
-            # Summary comparison table
-            with st.expander("Full comparison table (score + logistic PD* + MC PD*)"):
-                display_cols = ["mid", "gid", "score",
-                                "pd_star_logit", "pd_star_mc"]
-                if "defaulted" in comp_df.columns:
-                    display_cols.append("defaulted")
-                st.dataframe(
-                    comp_df[display_cols]
-                    .sort_values("pd_star_logit", ascending=False)
-                    .reset_index(drop=True),
-                    use_container_width=True,
-                    hide_index=True,
+        # ── Logistic vs MC comparison (shown when both are available) ─────────────
+        logit_df = st.session_state.get("logit_df")
+        mc_state = st.session_state.get("last_mc")
+        result_s = st.session_state.get("last_result")
+
+        if logit_df is not None and mc_state is not None and result_s is not None:
+            st.divider()
+            st.subheader("Diagnostic: Logistic PD* vs MC PD*")
+            st.caption(
+                "Comparing the two PD* estimation methods for the same population. "
+                "They should agree closely — high correlation confirms the logistic model is reliable."
+            )
+
+            mc_map = mc_state.set_index("mid")["pd_star"].to_dict()
+            comp_df = logit_df[["mid", "gid", "score", "defaulted", "pd_star"]
+                                if "defaulted" in logit_df.columns
+                                else ["mid", "gid", "score", "pd_star"]].copy()
+            comp_df = comp_df.rename(columns={"pd_star": "pd_star_logit"})
+            comp_df["pd_star_mc"] = comp_df["mid"].map(mc_map)
+            comp_df = comp_df.dropna(subset=["pd_star_mc"])
+
+            if not comp_df.empty:
+                from rosca_score_engine import _spearman as _sp
+                rho_ll    = _sp(comp_df["pd_star_logit"].values, comp_df["pd_star_mc"].values)
+                mean_diff = float((comp_df["pd_star_logit"] - comp_df["pd_star_mc"]).abs().mean())
+
+                x1, x2, x3 = st.columns(3)
+                with x1:
+                    c = "🟢 high agreement" if rho_ll >= 0.70 else ("🟡 moderate" if rho_ll >= 0.40 else "🔴 diverge")
+                    st.metric("Spearman ρ  (logistic vs MC)", f"{rho_ll:+.4f}", delta=c,
+                              help="How well the two PD* methods agree on member ranking. "
+                                   "High = logistic is a reliable proxy for MC.")
+                with x2:
+                    st.metric("Mean absolute difference", f"{mean_diff:.4f}",
+                              help="Average absolute gap between logistic PD* and MC PD* per member.")
+                with x3:
+                    st.metric("Members compared", len(comp_df))
+
+                scat = (
+                    alt.Chart(comp_df)
+                    .mark_circle(opacity=0.5, size=40)
+                    .encode(
+                        x=alt.X("pd_star_mc:Q",   title="MC PD* (model-free)",   scale=alt.Scale(domain=[0, 1])),
+                        y=alt.Y("pd_star_logit:Q", title="Logistic PD* (fitted)", scale=alt.Scale(domain=[0, 1])),
+                        tooltip=["mid", "gid",
+                                 alt.Tooltip("pd_star_logit:Q", format=".3f"),
+                                 alt.Tooltip("pd_star_mc:Q",    format=".3f"),
+                                 alt.Tooltip("score:Q",         format=".1f")],
+                    )
+                    .properties(height=340,
+                                title="Logistic PD* vs MC PD*  ·  diagonal = perfect agreement")
                 )
+                diag = (alt.Chart(pd.DataFrame({"x": [0, 1]}))
+                        .mark_line(strokeDash=[4, 2], color="gray")
+                        .encode(x="x:Q", y="x:Q"))
+                st.altair_chart(scat + diag, use_container_width=True)
+
+                with st.expander("Full comparison table (score + logistic PD* + MC PD*)"):
+                    display_cols = ["mid", "gid", "score", "pd_star_logit", "pd_star_mc"]
+                    if "defaulted" in comp_df.columns:
+                        display_cols.append("defaulted")
+                    st.dataframe(
+                        comp_df[display_cols]
+                        .sort_values("pd_star_logit", ascending=False)
+                        .reset_index(drop=True),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
