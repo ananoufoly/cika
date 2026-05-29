@@ -153,22 +153,22 @@ SCHEMA = {
 DEFAULTS = {k: v[2] for k, v in SCHEMA.items()}
 
 UI_GROUPS = {
-    "Group structure": ["n_groups", "group_size_min", "group_size_max",
+    "🏦 Group structure": ["n_groups", "group_size_min", "group_size_max",
                         "rtype_bidding_prob", "rules_prob"],
-    "Member behaviour": ["p_ontime_mean", "p_ontime_conc", "post_slip_mean",
+    "👥 Member behaviour": ["p_ontime_mean", "p_ontime_conc", "post_slip_mean",
                          "bid_agg_mean", "p_rep", "p_cent", "p_endf"],
-    "Economic environment": ["stress_level", "within_group_corr"],
-    "Default rule": ["streak_threshold"],
-    "Risk guardrails": ["p_prior_default", "p_payment_verified", "p_star_topology",
+    "🌍 Economic environment": ["stress_level", "within_group_corr"],
+    "⚖️ Default rule": ["streak_threshold"],
+    "🛡️ Risk guardrails": ["p_prior_default", "p_payment_verified", "p_star_topology",
                         "p_multi_group", "n_extra_groups_max",
                         "rho_max", "score_threshold"],
-    "Score formula (advanced)": ["a", "c_otr", "k_otr", "a_al", "a_ls", "a_slip",
+    "🧮 Score formula (advanced)": ["a", "c_otr", "k_otr", "a_al", "a_ls", "a_slip",
                                   "k_rules", "a_san", "q0", "k_q", "a_v",
                                   "w_rep", "w_cent", "w_endf", "w_ends",
                                   "gamma_rep", "w_unverified", "gov_star_penalty",
                                   "lambda_stack", "alpha_macro"],
-    "Randomness": ["seed"],
-    "MC PD* (optional)": ["mc_runs"],
+    "🎲 Randomness": ["seed"],
+    "🔁 MC PD* (optional)": ["mc_runs"],
 }
 
 
@@ -316,39 +316,114 @@ def _merge_mc_pdstar(result, mc_df):
 
 
 # ── Page layout ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="CIKA — Score", layout="wide")
-st.title("CIKA — Credit Score")
-st.caption(
-    "Scores savings-group members on 5 pillars (payment discipline, allocation order, "
-    "governance, liquidity, social capital). Members who miss payments consistently "
-    "**after receiving the pot** are scored 0.  "
-    "Click **Full analysis** to get everything in one step."
+st.set_page_config(
+    page_title="CIKA — Credit Score Simulator",
+    page_icon="💳",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# Custom CSS for cleaner presentation aesthetic
+st.markdown("""
+<style>
+    /* Hide Streamlit chrome */
+    #MainMenu, footer, header[data-testid="stHeader"] { visibility: hidden; }
+    /* Tighter top padding */
+    .block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1400px; }
+    /* Brand accent on primary buttons */
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        border: none; font-weight: 600; padding: 0.6rem 1.2rem;
+    }
+    .stButton button { border-radius: 8px; }
+    /* Sidebar polish */
+    section[data-testid="stSidebar"] { background: #fafafa; }
+    section[data-testid="stSidebar"] h2 { color: #4f46e5; font-size: 1.1rem; }
+    /* Metric cards */
+    div[data-testid="stMetric"] {
+        background: #ffffff; padding: 1rem; border-radius: 10px;
+        border: 1px solid #e5e7eb;
+    }
+    /* Tab styling */
+    button[data-baseweb="tab"] { font-weight: 500; font-size: 0.95rem; }
+    /* Hero header */
+    .cika-hero {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        padding: 1.5rem 2rem; border-radius: 12px; color: white;
+        margin-bottom: 1.5rem;
+    }
+    .cika-hero h1 { color: white; margin: 0; font-size: 1.8rem; font-weight: 700; }
+    .cika-hero p  { color: rgba(255,255,255,0.92); margin: 0.4rem 0 0; font-size: 0.95rem; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="cika-hero">
+  <h1>💳 CIKA — Credit Score Simulator</h1>
+  <p>Score ROSCA / tontine members on 5 pillars · estimate default risk · validate ranking power.</p>
+</div>
+""", unsafe_allow_html=True)
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.header("Settings")
+st.sidebar.markdown("## ⚙️ Settings")
+st.sidebar.caption("Pick a scenario, then run the analysis below.")
+
 preset = st.sidebar.selectbox(
-    "Quick scenario",
+    "Scenario preset",
     ["Default", "High economic stress", "Low payment discipline", "Strict scoring"],
-    help="Pre-fills parameters for a common scenario. You can still adjust individual values.",
+    help="Pre-fills parameters for a common scenario. You can still tweak individual values.",
 )
+
+# Presentation-friendly defaults (when preset == "Default")
+PRESET_DEFAULTS = {
+    "n_groups": 15,
+    "p_ontime_mean": 0.85,
+    "rtype_bidding_prob": 0.7,
+}
+
+# Groups always shown expanded
+PRIMARY_GROUPS = {"🏦 Group structure", "👥 Member behaviour"}
+# Groups always collapsed
+SECONDARY_GROUPS = {"🌍 Economic environment", "⚖️ Default rule", "🛡️ Risk guardrails"}
+# Everything else lives inside one Advanced super-expander
+ADVANCED_GROUPS = {"🧮 Score formula (advanced)", "🎲 Randomness", "🔁 MC PD* (optional)"}
+
 vals = {}
-for group_name, keys in UI_GROUPS.items():
-    advanced = group_name in ("Score formula (advanced)", "Randomness", "MC PD* (optional)")
-    with st.sidebar.expander(group_name, expanded=not advanced):
-        for k in keys:
-            sec, typ, default, label, desc = SCHEMA[k]
-            v0 = default
-            if preset == "High economic stress"   and k == "stress_level":  v0 = 0.70
-            if preset == "Low payment discipline" and k == "p_ontime_mean": v0 = 0.60
-            if preset == "Strict scoring"         and k in ("a_al", "a_ls", "a_slip"):
-                v0 = round(default * 1.3, 4)
-            if typ is int:
-                vals[k] = st.number_input(label, value=v0, step=1, help=desc, key=k)
-            elif typ is float:
-                vals[k] = st.number_input(label, value=v0, step=0.01, format="%.4f", help=desc, key=k)
-            else:
-                vals[k] = st.text_input(label, value=str(v0), help=desc, key=k)
+
+def _render_group(group_name, keys, container):
+    for k in keys:
+        sec, typ, default, label, desc = SCHEMA[k]
+        v0 = PRESET_DEFAULTS.get(k, default)
+        if preset == "High economic stress"   and k == "stress_level":  v0 = 0.70
+        if preset == "Low payment discipline" and k == "p_ontime_mean": v0 = 0.60
+        if preset == "Strict scoring"         and k in ("a_al", "a_ls", "a_slip"):
+            v0 = round(default * 1.3, 4)
+        if typ is int:
+            vals[k] = container.number_input(label, value=v0, step=1, help=desc, key=k)
+        elif typ is float:
+            vals[k] = container.number_input(label, value=v0, step=0.01, format="%.4f", help=desc, key=k)
+        else:
+            vals[k] = container.text_input(label, value=str(v0), help=desc, key=k)
+
+# Primary groups — open by default
+for group_name in PRIMARY_GROUPS:
+    keys = UI_GROUPS[group_name]
+    with st.sidebar.expander(group_name, expanded=True):
+        _render_group(group_name, keys, st)
+
+# Secondary groups — collapsed
+for group_name in SECONDARY_GROUPS:
+    keys = UI_GROUPS[group_name]
+    with st.sidebar.expander(group_name, expanded=False):
+        _render_group(group_name, keys, st)
+
+# Advanced — one big collapsed super-expander
+with st.sidebar.expander("🔧 Advanced settings", expanded=False):
+    st.caption("Score formula weights, RNG seed, MC settings — leave defaults for most demos.")
+    for group_name in ADVANCED_GROUPS:
+        st.markdown(f"**{group_name}**")
+        _render_group(group_name, UI_GROUPS[group_name], st)
+        st.markdown("---")
 
 # ── Scale warning ─────────────────────────────────────────────────────────────
 _n_groups_ui = int(vals.get("n_groups", 20))
@@ -379,26 +454,27 @@ elif _n_groups_ui > 2_000:
         f"**~{_est_sim_s} s**. Consider using 500–2,000 groups for faster interactive results."
     )
 elif _n_groups_ui > _KEEP_MEETINGS_LIMIT:
-    st.info(
-        f"**{_n_groups_ui:,} groups (~{_est_members:,} members)** (~{_est_sim_s} s) — "
-        "meeting-level data will not be retained to save memory (scores and validation unaffected)."
+    st.caption(
+        f"ℹ️ {_n_groups_ui:,} groups (~{_est_members:,} members, ~{_est_sim_s}s). "
+        "Meeting-level data not retained at this scale."
     )
+else:
+    st.caption(f"~{_est_members:,} members to simulate · estimated runtime: ~{max(_est_sim_s, 1)}s")
 
 # ── Action buttons ────────────────────────────────────────────────────────────
-st.subheader("Run")
-c1, c2, c3 = st.columns(3)
+st.markdown("### ▶ Run analysis")
+c1, c2, c3 = st.columns([2, 1.5, 1.5])
 with c1:
-    full_btn    = st.button("Full analysis ▶", type="primary",
+    full_btn    = st.button("🚀 Full analysis", type="primary", use_container_width=True,
                             help="Score + default rule + logistic PD* — one click, results in seconds.")
 with c2:
-    run_def_btn = st.button("Score + defaults only",
+    run_def_btn = st.button("Score + defaults only", use_container_width=True,
                             help="Simulate scores and apply the default rule. No PD* fitting.")
 with c3:
     _mc_disabled = _n_groups_ui > _MC_BLOCK_LIMIT
-    run_mc_btn  = st.button("Add MC PD* (optional)",
+    run_mc_btn  = st.button("Add MC PD* (slow)", use_container_width=True,
                             disabled=_mc_disabled,
-                            help="Model-free PD* estimate via Monte Carlo re-simulation (slower). "
-                                 "Adds a comparison tab vs the logistic estimate. "
+                            help="Model-free PD* via Monte Carlo re-simulation. "
                                  f"Disabled above {_MC_BLOCK_LIMIT:,} groups.")
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -511,15 +587,15 @@ pv      = st.session_state.get("pdstar_val")
 source  = st.session_state.get("pdstar_source")
 
 if result is None:
-    st.info("Configure settings in the sidebar and click **Full analysis** to get started.")
+    st.info("👈 Adjust settings in the sidebar, then click **🚀 Full analysis** to get started.")
     st.stop()
 
 st.divider()
-tab_pdstar, tab_score, tab_bench, tab_data = st.tabs([
-    "📊 PD* Validation  ← primary results",
+tab_score, tab_pdstar, tab_bench, tab_data = st.tabs([
     "🎯 Score Overview",
-    "🔬 Benchmark (true PD)",
-    "📋 Raw data",
+    "📊 PD* Validation",
+    "🔬 Benchmark vs True PD",
+    "📋 Raw Data",
 ])
 
 # ──────────────────────────────────────────────────────────────────────────────
