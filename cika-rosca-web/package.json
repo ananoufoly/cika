@@ -1,0 +1,7 @@
+{
+  "name": "cika-rosca-web",
+  "version": "1.0.0",
+  "description": "CIKA bid-allocation circle — interactive engine demo (static site)",
+  "type": "module",
+  "private": true
+}

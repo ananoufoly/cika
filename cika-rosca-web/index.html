@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CIKA Circle — Engine & Economics</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="brand">CIKA<span>·</span>Circle</div>
+    <h1>A bid-allocation rotating circle, engineered to be solvent and bank-partnerable</h1>
+    <p class="sub">An interactive model of the mechanism, its solvency, and the economics for members, CIKA, and a bank partner. Every number on this page is computed live by the actual engine running in your browser.</p>
+    <div class="pills">
+      <span class="pill">No upfront capital</span>
+      <span class="pill">Self-funding reserve</span>
+      <span class="pill">Discipline rewarded</span>
+      <span class="pill">Bank-managed treasury</span>
+      <span class="pill ok">~0% failure (central)</span>
+    </div>
+    <p class="disclaimer">Internal working model — not a public offer. Terminology on this page is illustrative and engineering-oriented; consumer-facing language is governed separately for compliance.</p>
+  </div>
+</header>
+
+<nav class="tabs wrap">
+  <a href="#how" class="tab active">1 · How it works</a>
+  <a href="#sim" class="tab">2 · Live simulator</a>
+  <a href="#money" class="tab">3 · Who earns what</a>
+  <a href="#slots" class="tab">4 · Slot pricing</a>
+  <a href="#options" class="tab">5 · CIKA &amp; bank options</a>
+</nav>
+
+<!-- 1 · HOW IT WORKS -->
+<section id="how" class="wrap">
+  <h2>1 · How one month works</h2>
+  <p class="lead">Walk a single turn. The pot is split three ways; the leftover builds a reserve that protects the circle and is placed with a bank treasury between payouts.</p>
+  <div class="flow" id="flowDiagram"></div>
+  <div class="flow-controls">
+    <button id="flowPrev" class="btn ghost">‹ Back</button>
+    <span id="flowStepLabel" class="step-label"></span>
+    <button id="flowNext" class="btn">Next ›</button>
+  </div>
+  <div class="props">
+    <div class="prop"><b>Discipline strictly wins.</b> Leaving early is engineered to never pay — gains are clawed back to ≤ 0. The only winning strategy is to stay to the end.</div>
+    <div class="prop"><b>The reserve does two jobs.</b> It absorbs missed-payment shocks (solvency) and, while idle, is placed with the bank to generate a distribution shared with members.</div>
+    <div class="prop"><b>Downside is capped.</b> A member who stays can't lose more than a set floor, funded from the reserve. Exiters forfeit this protection.</div>
+  </div>
+</section>
+
+<!-- 2 · LIVE SIMULATOR -->
+<section id="sim" class="wrap alt">
+  <h2>2 · Live simulator</h2>
+  <p class="lead">Adjust the design and run a real Monte Carlo in your browser (no server). The central UEMOA-realistic scenario uses partial-payment stress with two lean-season dips.</p>
+  <div class="sim-grid">
+    <div class="controls card">
+      <h3>Design levers</h3>
+      <label>Members in circle (N): <output id="oN"></output><input type="range" id="cN" min="6" max="24" step="1"></label>
+      <label>Monthly contribution (FCFA): <output id="oc"></output><input type="range" id="cc" min="5000" max="100000" step="5000"></label>
+      <label>Cycles (lifespan = N × cycles months): <output id="ocyc"></output><input type="range" id="ccyc" min="1" max="4" step="1"></label>
+      <hr>
+      <label>Treasury yield (gross annual): <output id="oyld"></output><input type="range" id="cyld" min="0" max="0.20" step="0.01"></label>
+      <label>Member share of distribution: <output id="oms"></output><input type="range" id="cms" min="0.5" max="1.0" step="0.05"></label>
+      <hr>
+      <label>Bank liquidity line (FCFA): <output id="oline"></output><input type="range" id="cline" min="0" max="1200000" step="100000"></label>
+      <label>Payment discipline (avg on-time): <output id="opb"></output><input type="range" id="cpb" min="0.70" max="0.99" step="0.01"></label>
+      <hr>
+      <label>Monte Carlo paths: <output id="opaths"></output><input type="range" id="cpaths" min="200" max="2000" step="200"></label>
+      <button id="runBtn" class="btn big">▶ Run simulation</button>
+      <button id="resetBtn" class="btn ghost">Reset to central</button>
+    </div>
+    <div class="results">
+      <div class="kpi-grid" id="kpiGrid"></div>
+      <div class="card chart-card">
+        <h3>Member outcome distribution <span class="hint">net position, FCFA — disciplined members only</span></h3>
+        <canvas id="histCanvas" width="640" height="220"></canvas>
+        <div class="legend"><span class="sw pos"></span>finished ahead <span class="sw neg"></span>finished behind <span class="sw floor"></span>protected floor</div>
+      </div>
+      <div class="card chart-card">
+        <h3>Reserve &amp; bank-line over one representative path <span class="hint">FCFA</span></h3>
+        <canvas id="reserveCanvas" width="640" height="200"></canvas>
+        <div class="legend"><span class="sw res"></span>reserve (incl. treasury-placed) <span class="sw line"></span>bank line drawn</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 3 · WHO EARNS WHAT -->
+<section id="money" class="wrap">
+  <h2>3 · Who earns what</h2>
+  <p class="lead">Per circle, and scaled across a portfolio. Reflects the current simulator settings.</p>
+  <div class="money-grid" id="moneyGrid"></div>
+  <div class="card">
+    <h3>Scaled to a portfolio</h3>
+    <label class="inline">Number of active circles: <output id="oCircles"></output><input type="range" id="cCircles" min="100" max="50000" step="100"></label>
+    <div class="scaled" id="scaledOut"></div>
+    <p class="note">CIKA's revenue is a share of the treasury distribution (assets-under-management style) plus any auction fee — it scales with the number of circles, not by extracting from members' pots.</p>
+  </div>
+</section>
+
+<!-- 4 · SLOT PRICING -->
+<section id="slots" class="wrap alt">
+  <h2>4 · Slot pricing schedule</h2>
+  <p class="lead">Each position has an automatically-solved minimum asking price. It is set so that taking the pot early and then leaving nets <b>≤ 0</b> — making "stay to the end" the dominant strategy at every slot. Early slots cost more and hold back more, for longer; the last slot holds back nothing.</p>
+  <div class="card table-card">
+    <table id="slotTable"><thead><tr>
+      <th>Slot</th><th>Held back (escrow)</th><th>Asking price</th><th>Immediate</th><th>Deferred</th><th>Unlock lag</th><th>Net if you quit</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+  <p class="note">"Net if you quit" ≤ 0 at every slot is the engineering guarantee that the circle cannot be gamed by taking-and-running.</p>
+</section>
+
+<!-- 5 · OPTIONS -->
+<section id="options" class="wrap">
+  <h2>5 · CIKA &amp; bank partner options</h2>
+  <p class="lead">The bank's role is separable into three layers. CIKA can launch with the treasury layer alone and add the rest.</p>
+  <div class="options-grid" id="optionsGrid"></div>
+  <div class="card compare-card">
+    <h3>Compare configurations <span class="hint">live-simulated</span></h3>
+    <button id="compareBtn" class="btn">Run comparison</button>
+    <table id="compareTable"><thead><tr>
+      <th>Configuration</th><th>Failure rate</th><th>Loyal member (median)</th><th>CIKA / circle</th><th>Bank / circle</th><th>Bank line p95</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p>CIKA Circle interactive model · computed entirely client-side · <span id="buildNote"></span></p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
