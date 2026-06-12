@@ -208,7 +208,9 @@ class ParamsPnLOperateur:
     cout_notifications_membre_mois: float = 20.0 # XOF par membre par mois (SMS/push)
     cout_support_pool_mois: float = 200.0        # XOF par pool par mois (support/litiges amorti)
 
-    couts_fixes_mensuels: float = 500_000.0      # XOF par mois (équipe, conformité, tech)
+    couts_fixes_mensuels: float = 0.0            # SUPPRIMÉ : on isole l'économie unitaire
+                                                 # (marge par pool). Les frais de structure
+                                                 # relèvent du financement, traités séparément.
     retrocession_sfd: float = 0.0                # % des intérêts de crédit SFD rétrocédés
                                                  # à l'Opérateur (0 = conservateur)
 

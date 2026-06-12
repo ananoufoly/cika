@@ -102,7 +102,8 @@ function lancer() {
     const p = configCourante();
     const agg = monteCarlo(p, P._runs, 12345);
     dernierAgg = agg;
-    renderKPIs(agg);
+    const rRef = simulerPortefeuille(p, 12345);  // run représentatif pour la marge/pool
+    renderKPIs(agg, rRef.margePool);
     drawPertes(agg._pertes);
     drawCascade(agg);
     renderCascadeViz(agg);
@@ -112,7 +113,7 @@ function lancer() {
   }, 20);
 }
 
-function renderKPIs(a) {
+function renderKPIs(a, margePoolCourant) {
   const items = [
     { l: 'Taux complétion cycles', v: pct(a.tauxCompletion.moyenne), c: a.tauxCompletion.moyenne > 0.7 ? 'ok' : a.tauxCompletion.moyenne > 0.4 ? 'warn' : 'bad', s: 'membres non défaillants' },
     { l: 'Rétention cycle 1→2', v: pct(a.retention.moyenne), c: 'brand', s: 'restent actifs au cycle 2' },
@@ -120,7 +121,7 @@ function renderKPIs(a) {
     { l: 'Rendement net SFD', v: pct(a.rendementSFD.moyenne), c: 'ok', s: 'sur dépôts moyens' },
     { l: 'P&L SFD', v: fmtK(a.pnlSFD.moyenne), c: a.pnlSFD.moyenne > 0 ? 'ok' : 'bad', s: 'résultat net partenaire' },
     { l: 'P&L Opérateur', v: fmtK(a.pnlOp.moyenne), c: a.pnlOp.moyenne > 0 ? 'ok' : 'bad', s: 'à ' + P.n_pools + ' pools' },
-    { l: 'Break-even', v: isFinite(a.breakEven.moyenne) ? fmt(a.breakEven.moyenne) + ' pools' : '—', c: 'brand', s: 'seuil de rentabilité' },
+    { l: 'Marge / pool', v: fmt(margePoolCourant), c: margePoolCourant > 0 ? 'ok' : 'bad', s: 'commission − coûts variables' },
     { l: 'Taux respect K', v: pct(a.tauxRespectK.moyenne), c: 'brand', s: 'diversification atteinte' },
   ];
   $('kpiGrid').innerHTML = items.map(i => `<div class="kpi"><div class="lbl">${i.l}</div><div class="val ${i.c}">${i.v}</div><small>${i.s}</small></div>`).join('');
@@ -191,10 +192,13 @@ function drawBreakEven(p) {
   // courbe
   ctx.strokeStyle = '#0f4c4a'; ctx.lineWidth = 2.2; ctx.beginPath();
   for (let n = 0; n <= nmax; n += 20) { const x = xs(n), y = ys(pnlAt(n)); n === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke();
-  // break-even
-  if (isFinite(be) && be <= nmax) {
+  // break-even (seulement si des frais de structure existent)
+  if (fixes > 0 && isFinite(be) && be <= nmax) {
     ctx.strokeStyle = '#b18a3a'; ctx.setLineDash([5, 5]); ctx.beginPath(); ctx.moveTo(xs(be), 10); ctx.lineTo(xs(be), H - 22); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = '#b18a3a'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('break-even ≈ ' + Math.round(be) + ' pools', xs(be), 22);
+  } else if (fixes <= 0) {
+    ctx.fillStyle = '#15803d'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('marge ≈ ' + fmt(margePool) + ' XOF / pool — rentable dès le 1ᵉʳ pool', xs(50), 22);
   }
   ctx.fillStyle = '#5b6b87'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
   ctx.fillText(fmtK(pnlMax) + ' XOF', 4, 16); ctx.fillText(fmtK(pnlMin), 4, H - 24);
@@ -213,9 +217,9 @@ function renderPnL(p) {
         <li>Commissions fermes <b>${fmtK(r.commissionTot)}</b></li>
         <li>Coût acquisition <b>−${fmtK(r.coutAcq)}</b></li>
         <li>Coût opérationnel <b>−${fmtK(r.coutOps)}</b></li>
-        <li>Coûts fixes <b>−${fmtK(r.coutsFixes)}</b></li>
+        ${r.coutsFixes > 0 ? `<li>Coûts fixes <b>−${fmtK(r.coutsFixes)}</b></li>` : ''}
         <li>Marge / pool <b>${fmt(r.margePool)}</b></li>
-        <li>Break-even <b>${isFinite(r.breakEven) ? Math.round(r.breakEven) + ' pools' : '—'}</b></li>
+        <li>Rentabilité <b>${r.coutsFixes > 0 ? (isFinite(r.breakEven) ? 'dès ' + Math.round(r.breakEven) + ' pools' : '—') : 'dès le 1ᵉʳ pool'}</b></li>
       </ul>
     </div>
     <div class="pnl-card sfd">

@@ -82,7 +82,7 @@ export const DEFAUTS = {
   macro_actif: false, z_choc: 0.0, z_persistance: 0,
   // P&L Opérateur
   cout_acquisition_membre: 2000, cout_mm_taux: 0.01, cout_notif_membre: 20, cout_support_pool: 200,
-  couts_fixes_mensuels: 500000, retrocession_sfd: 0.0,
+  couts_fixes_mensuels: 0, retrocession_sfd: 0.0,
 };
 
 // taux périodiques
