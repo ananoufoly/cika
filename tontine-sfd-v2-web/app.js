@@ -15,8 +15,108 @@ document.querySelectorAll('.niv-btn').forEach(b => b.addEventListener('click', (
   const niv = b.dataset.niv;
   $('vue-public').hidden = (niv !== 'public');
   $('vue-investisseur').hidden = (niv !== 'investisseur');
+  $('vue-parametres').hidden = (niv !== 'parametres');
+  $('vue-doc').hidden = (niv !== 'doc');
   if (niv === 'investisseur' && !dernierMC) lancerSim();
+  if (niv === 'parametres') renderParametres();
 }));
+
+// ============ VUE PARAMÈTRES (tous, interactifs) ============
+// objet de config "maître" couvrant TOUS les paramètres (au-delà des 6 sliders investisseur)
+let PARAMS = { ...DEFAUTS };
+const SCHEMA = [
+  { grp: '📐 Structure du cercle', desc: "La taille et la durée des pools.", items: [
+    { k: 'n_pools', nom: 'Nombre de pools', d: "Combien de cercles tournent en parallèle (échelle du portefeuille).", t: 'range', min: 10, max: 100, step: 10 },
+    { k: 'm_membres', nom: 'Membres par pool', d: "Taille d'un cercle. Détermine le pot = (M−1)×cotisation.", t: 'range', min: 6, max: 15, step: 1 },
+    { k: 'c', nom: 'Cotisation mensuelle', d: "Ce que chaque membre verse chaque mois (XOF).", t: 'range', min: 25000, max: 200000, step: 25000, fmt: 'k' },
+    { k: 'n_cycles', nom: 'Nombre de cycles', d: "Durée de vie du produit = M × cycles mois.", t: 'range', min: 1, max: 4, step: 1 },
+    { k: 'k_max', nom: 'Max même secteur / pool', d: "Diversification : au plus K membres du même secteur par pool (limite la corrélation).", t: 'range', min: 1, max: 6, step: 1 },
+  ]},
+  { grp: '⚙️ Produit & mécanisme', desc: "Type de tontine et structure du coût.", items: [
+    { k: 'mode', nom: 'Type de tontine', d: "Nue : sans garantie ni frais. Garantie : prime + couverture.", t: 'mode' },
+    { k: 'prime_facteur_prudence', nom: 'Prudence de la prime', d: "1× = actuariel juste. >1 = prime majorée, plus robuste au stress (mais plus chère).", t: 'range', min: 0.8, max: 2.5, step: 0.1, fmt: 'x' },
+    { k: 'prime_operateur_taux', nom: 'Marge Opérateur', d: "Marge de la plateforme, en % du pot, prélevée sur chaque encaissement.", t: 'range', min: 0, max: 0.04, step: 0.005, fmt: 'pct' },
+    { k: 'r_sfd_annuel', nom: 'Taux SFD (avances)', d: "Taux annuel des avances de la SFD (intérêts du crédit-relais).", t: 'range', min: 0.06, max: 0.30, step: 0.02, fmt: 'pct' },
+    { k: 'rho_mensuel', nom: 'Valeur-temps (ρ)', d: "Combien un membre pressé valorise l'accès anticipé → niveau des bids.", t: 'range', min: 0.005, max: 0.05, step: 0.005, fmt: 'pct' },
+    { k: 'bid_plafond_frac_pot', nom: 'Plafond du surplus de bid', d: "Limite du surplus payé pour passer devant (compétitivité / usure).", t: 'range', min: 0.04, max: 0.25, step: 0.02, fmt: 'pct' },
+  ]},
+  { grp: '👥 Préférences de liquidité', desc: "Qui est pressé, qui est patient.", items: [
+    { k: 'part_urgent', nom: 'Part d\'urgents', d: "Membres qui veulent leur argent tôt (bident le plus).", t: 'range', min: 0, max: 0.6, step: 0.05, fmt: 'pct' },
+    { k: 'part_epargnant', nom: 'Part d\'épargnants', d: "Membres patients qui attendent (reçoivent gratuitement).", t: 'range', min: 0, max: 0.8, step: 0.05, fmt: 'pct' },
+  ]},
+  { grp: '🚪 Fuite & défaillance', desc: "Le risque que le modèle doit couvrir.", items: [
+    { k: 'p_fuite_base', nom: 'Taux de fuite', d: "% des bénéficiaires qui disparaissent après avoir encaissé.", t: 'range', min: 0.02, max: 0.30, step: 0.02, fmt: 'pct' },
+    { k: 'fuite_mult_tour_precoce', nom: 'Tentation tour précoce', d: "Multiplicateur de fuite au tour 1 (prendre tôt = plus tentant de fuir).", t: 'range', min: 1, max: 3, step: 0.2, fmt: 'x' },
+    { k: 'charge_z_fuite', nom: 'Sensibilité macro', d: "À quel point un choc économique augmente les fuites (corrélation).", t: 'range', min: 0, max: 0.8, step: 0.05 },
+    { k: 'taux_echec_friction', nom: 'Échec de prélèvement', d: "% de cotisations qui échouent temporairement (récupérable).", t: 'range', min: 0, max: 0.15, step: 0.01, fmt: 'pct' },
+  ]},
+  { grp: '🛡️ Couverture (3 étages)', desc: "Comment le trou d'une fuite est absorbé.", items: [
+    { k: 'mitigation_active', nom: 'Mitigations', d: "Activer accès séquencé + garantie d'enchère + prélèvement auto.", t: 'bool' },
+    { k: 't_restreint', nom: 'Tours réservés (historique)', d: "Les N premiers tours réservés aux membres avec historique.", t: 'range', min: 0, max: 5, step: 1 },
+    { k: 'g_cotisations', nom: 'Consignation pour bider tôt', d: "Garantie (en nb de cotisations) saisie si fuite.", t: 'range', min: 0, max: 3, step: 1 },
+    { k: 'fge_actif', nom: 'FGE (fonds de garantie)', d: "Le fonds endogène (primes + saisies) qui absorbe en premier.", t: 'bool' },
+    { k: 'tranche_sfd_active', nom: 'Tranche SFD', d: "La SFD absorbe après le FGE (sa peau dans le jeu).", t: 'bool' },
+    { k: 'plafond_tranche_sfd_frac', nom: 'Plafond tranche SFD', d: "Jusqu'où la SFD couvre, en % des avances. Au-delà = résiduel.", t: 'range', min: 0.01, max: 0.15, step: 0.01, fmt: 'pct' },
+  ]},
+  { grp: '🌩️ Stress', desc: "Tester le modèle en conditions dégradées.", items: [
+    { k: 'comportemental_actif', nom: 'Stress comportemental', d: "Plus de fuites et plus de membres pressés.", t: 'bool' },
+    { k: 'choc_fuite', nom: 'Choc de fuite', d: "Points de fuite ajoutés en stress comportemental.", t: 'range', min: 0, max: 0.15, step: 0.01, fmt: 'pct' },
+    { k: 'macro_actif', nom: 'Stress macro', d: "Choc économique systémique (fuites corrélées).", t: 'bool' },
+    { k: 'z_choc', nom: 'Sévérité du choc macro', d: "Ampleur du choc (négatif = mauvaise conjoncture).", t: 'range', min: -4, max: 0, step: 0.5 },
+  ]},
+];
+
+function fmtParam(v, fmt) {
+  if (fmt === 'k') return fmt0(v);
+  if (fmt === 'pct') return (v * 100).toFixed(1).replace(/\.0$/, '') + '%';
+  if (fmt === 'x') return v.toFixed(1) + '×';
+  return (typeof v === 'number' && v % 1 !== 0) ? v.toFixed(2) : v;
+}
+const fmt0 = x => Math.round(x).toLocaleString('fr-FR');
+
+function renderParametres() {
+  $('paramGroupes').innerHTML = SCHEMA.map(g => `
+    <div class="param-groupe">
+      <h3>${g.grp}</h3>
+      <div class="grp-desc">${g.desc}</div>
+      ${g.items.map(it => paramRow(it)).join('')}
+    </div>`).join('');
+  // attacher les handlers
+  SCHEMA.flatMap(g => g.items).forEach(it => attachParam(it));
+}
+
+function paramRow(it) {
+  let ctrl = '';
+  if (it.t === 'range') {
+    ctrl = `<div class="p-ctrl"><input type="range" id="px_${it.k}" min="${it.min}" max="${it.max}" step="${it.step}" value="${PARAMS[it.k]}"><span class="p-val" id="pv_${it.k}">${fmtParam(PARAMS[it.k], it.fmt)}</span></div>`;
+  } else if (it.t === 'bool') {
+    ctrl = `<div class="p-toggle" id="px_${it.k}"><button data-v="1" class="${PARAMS[it.k] ? 'on' : ''}">Oui</button><button data-v="0" class="${!PARAMS[it.k] ? 'on' : ''}">Non</button></div>`;
+  } else if (it.t === 'mode') {
+    ctrl = `<div class="p-toggle" id="px_${it.k}"><button data-v="garantie" class="${PARAMS[it.k] === 'garantie' ? 'on' : ''}">Garantie</button><button data-v="nue" class="${PARAMS[it.k] === 'nue' ? 'on' : ''}">Nue</button></div>`;
+  }
+  return `<div class="param-row"><div><div class="p-nom">${it.nom}</div><div class="p-desc">${it.d}</div></div>${ctrl}<div></div></div>`;
+}
+
+function attachParam(it) {
+  const el = $('px_' + it.k); if (!el) return;
+  if (it.t === 'range') {
+    el.addEventListener('input', e => { PARAMS[it.k] = +e.target.value; $('pv_' + it.k).textContent = fmtParam(PARAMS[it.k], it.fmt); $('paramStatus').textContent = '⟳ modifié — relancez pour voir l\'effet'; });
+  } else {
+    el.querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => {
+      el.querySelectorAll('button').forEach(b => b.classList.remove('on')); btn.classList.add('on');
+      const v = btn.dataset.v; PARAMS[it.k] = (it.t === 'mode') ? v : (v === '1');
+      $('paramStatus').textContent = '⟳ modifié — relancez pour voir l\'effet';
+    }));
+  }
+}
+
+$('btnRunParams') && $('btnRunParams').addEventListener('click', () => {
+  // basculer vers l'onglet chiffres et lancer avec PARAMS
+  document.querySelectorAll('.niv-btn').forEach(x => x.classList.toggle('active', x.dataset.niv === 'investisseur'));
+  $('vue-public').hidden = true; $('vue-parametres').hidden = true; $('vue-doc').hidden = true; $('vue-investisseur').hidden = false;
+  lancerSimAvec(PARAMS);
+});
+$('btnResetParams') && $('btnResetParams').addEventListener('click', () => { PARAMS = { ...DEFAUTS }; renderParametres(); $('paramStatus').textContent = 'valeurs par défaut restaurées'; });
 
 // ============ ANIMATION GRAND PUBLIC ============
 const MODE_HINTS = {
@@ -164,10 +264,14 @@ document.querySelectorAll('#scenSeg .seg-btn').forEach(b => b.addEventListener('
 $('btnRun').onclick = lancerSim;
 
 function lancerSim() {
+  let p = SCEN[scen]({ ...DEFAUTS, n_pools: P.n_pools, m_membres: P.m_membres, c: P.c, p_fuite_base: P.p_fuite_base, prime_facteur_prudence: P.prime_facteur_prudence });
+  lancerSimAvec(p, P._runs);
+}
+function lancerSimAvec(pBase, nRuns) {
   $('btnRun').textContent = 'Calcul…';
   setTimeout(() => {
-    let p = SCEN[scen]({ ...DEFAUTS, n_pools: P.n_pools, m_membres: P.m_membres, c: P.c, p_fuite_base: P.p_fuite_base, prime_facteur_prudence: P.prime_facteur_prudence });
-    const a = monteCarlo(p, P._runs, 12345);
+    const p = { ...pBase };
+    const a = monteCarlo(p, nRuns || P._runs, 12345);
     dernierMC = a;
     renderKPIs(a, p);
     drawExpo(a, p);

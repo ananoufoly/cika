@@ -17,7 +17,9 @@
 
 <nav class="niveaux wrap">
   <button class="niv-btn active" data-niv="public">👁️ Comprendre le mécanisme</button>
-  <button class="niv-btn" data-niv="investisseur">📊 Les chiffres (investisseur)</button>
+  <button class="niv-btn" data-niv="investisseur">📊 Les chiffres</button>
+  <button class="niv-btn" data-niv="parametres">🎛️ Tous les paramètres</button>
+  <button class="niv-btn" data-niv="doc">📖 Documentation</button>
 </nav>
 
 <!-- ============ NIVEAU GRAND PUBLIC ============ -->
@@ -112,6 +114,103 @@
           <canvas id="coutCanvas" width="640" height="200"></canvas>
         </div>
       </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ NIVEAU PARAMÈTRES (tous, interactifs) ============ -->
+<main id="vue-parametres" hidden>
+  <section class="wrap">
+    <h2>Tous les paramètres du modèle</h2>
+    <p class="lead">Chaque levier du modèle, groupé par thème, avec ce qu'il fait. Modifiez ce que vous voulez puis relancez — l'onglet « Les chiffres » utilise ces valeurs.</p>
+    <div class="param-actions">
+      <button id="btnRunParams" class="btn">▶ Relancer la simulation</button>
+      <button id="btnResetParams" class="btn ghost">↺ Valeurs par défaut</button>
+      <span class="param-status" id="paramStatus"></span>
+    </div>
+    <div id="paramGroupes"></div>
+  </section>
+</main>
+
+<!-- ============ NIVEAU DOCUMENTATION ============ -->
+<main id="vue-doc" hidden>
+  <section class="wrap doc">
+    <h2>Documentation technique</h2>
+    <p class="lead">La mécanique complète du modèle, avec les formules. Acteurs : <b>Opérateur</b> (plateforme), <b>SFD</b> (institution dépositaire), <b>Membre</b>, <b>Pool</b>, <b>FGE</b> (Fonds de Garantie Endogène).</p>
+
+    <div class="doc-bloc">
+      <h3>1. Le problème</h3>
+      <p>Une tontine rotative classique de M membres : chacun cotise <code>c</code> par mois, et à tour de rôle un membre reçoit le pot. Le risque structurel : <b>un membre qui a déjà encaissé son tour peut disparaître</b> et cesser de cotiser. Le groupe subit alors la perte. C'est ce qui empêche les tontines de garantir quoi que ce soit.</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>2. La mécanique : crédit-relais</h3>
+      <p>Le pot collecté par tour = <code>(M−1)·c</code> (le bénéficiaire ne cotise pas pour lui-même ce mois-là). Le gagnant du tour reçoit <b>net = pot − bid</b>, que la <b>SFD avance</b>. C'est un prêt, récupéré linéairement sur la durée restante <code>d = M−t</code> :</p>
+      <p class="formule">mensualité = net / d &nbsp;·&nbsp; prélevée sur le compte tontine chaque mois</p>
+      <p>Le <b>bid</b> est retenu à la source : il contient les intérêts SFD + la prime de garantie + la marge Opérateur. C'est le <b>prix du crédit-relais</b>, payé d'avance.</p>
+      <p class="exemple">Exemple (M=10, c=100 000, bid=150 000) : pot = 900 000, net = 750 000, mensualité = 750 000/9 ≈ 83 333, récupéré sur 9 mois.</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>3. Deux produits : nue vs garantie</h3>
+      <p><b>Tontine nue</b> : ordre pur, aucun frais, aucun bid. Le risque de fuite est porté par le groupe.</p>
+      <p><b>Tontine garantie</b> : prime de garantie obligatoire + bid optionnel + couverture. Le membre est toujours servi.</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>4. Le coût d'un encaisseur (tontine garantie)</h3>
+      <p class="formule">coût = intérêts SFD (∝ durée) + prime de garantie (∝ avance) + marge Opérateur + surplus de position (optionnel)</p>
+      <ul>
+        <li><b>Intérêts SFD</b> = net × r_sfd_mensuel × d. Rémunère l'avance.</li>
+        <li><b>Prime de garantie</b> = obligatoire, proportionnelle à l'<b>avance</b> (= pot reçu − épargne déjà versée). L'épargnant pur du dernier tour a une avance ≈ 0 → ne paie rien.</li>
+        <li><b>Marge Opérateur</b> = un % fixe du pot.</li>
+        <li><b>Surplus</b> = uniquement si on bide pour passer devant (taxe la priorité, pas le risque).</li>
+      </ul>
+      <p>La prime de garantie est calculée actuariellement :</p>
+      <p class="formule">prime = facteur_prudence × p_fuite × (avance / 2) × (d / d_max)</p>
+      <p>Le facteur (avance/2) = principal moyen exposé sur la durée ; (d/d_max) fait décroître le coût du tour 1 (durée longue) au dernier tour (durée nulle).</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>5. La fuite</h3>
+      <p>Seul le cas critique est modélisé : un membre <b>ayant encaissé</b> qui disparaît. <code>p_fuite</code> est la probabilité <b>totale</b> de fuir sur toute la durée post-encaissement (« X % des bénéficiaires fuient »), convertie en probabilité mensuelle. Elle est amplifiée par : le tour pris (précoce = plus tentant), un choc macro corrélé (facteur Z, via la charge sectorielle), et un choc comportemental.</p>
+      <p class="formule">trou d'une fuite = principal restant de l'avance non récupérée</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>6. La couverture en cascade</h3>
+      <p>Quand une fuite crée un trou, il est absorbé dans cet ordre strict :</p>
+      <ol>
+        <li><b>FGE</b> — Fonds de Garantie Endogène. Constitué <b>sans capital de la fintech</b> : primes de garantie accumulées + garanties d'enchère saisies sur les fuyards. Première perte.</li>
+        <li><b>Tranche SFD junior</b> — la SFD absorbe ce qui dépasse le FGE, jusqu'à un plafond (% des avances). C'est sa <b>peau dans le jeu</b> : ça rend la garantie crédible et aligne ses intérêts. Rémunérée par ses intérêts.</li>
+        <li><b>Résiduel</b> — au-delà du plafond SFD. Doit être ≈ 0, sinon la promesse casse. Le modèle montre que c'est rarissime.</li>
+      </ol>
+      <p>La SFD <b>avance toujours</b> : le membre est <b>toujours servi</b>. La « casse de promesse » est un événement de résiduel &gt; 0 — pas un membre non payé.</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>7. Les mitigations</h3>
+      <ul>
+        <li><b>Accès séquencé</b> : les premiers tours réservés aux membres avec un historique.</li>
+        <li><b>Garantie d'enchère</b> : consignation pour bider tôt, saisie si fuite. Filtre anti-fuyard + alimente le FGE.</li>
+        <li><b>Prélèvement automatique</b> : réduit les échecs de cotisation temporaires (friction).</li>
+      </ul>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>8. Risque corrélé</h3>
+      <p>Modèle à facteur unique (style Vasicek) : un facteur systémique Z commun, et chaque membre porte une <b>charge sectorielle ρ</b> sur Z. Un choc macro (Z &lt; 0) augmente les fuites de tous les membres exposés simultanément — ce qui teste la mutualisation et la composition des pools (max K membres d'un même secteur).</p>
+    </div>
+
+    <div class="doc-bloc">
+      <h3>9. Les deux sorties du modèle</h3>
+      <p><b>P&L Opérateur (brut)</b> : primes Opérateur + surplus d'enchère. Le <b>taux de fuite de break-even</b> = le niveau de fuite au-delà duquel le FGE ne suffit plus.</p>
+      <p><b>Tenue de la promesse</b> : taux de continuité (tous les tours servis), P[promesse cassée], exposition SFD mois par mois, fréquence de perte SFD. Cible : promesse tenue dans &gt; 99,9 % des cycles.</p>
+    </div>
+
+    <div class="doc-bloc note">
+      <h3>⚠️ Limite : ne pas vendre comme une assurance</h3>
+      <p>Promettre explicitement « garanti » attire les mauvais profils (anti-sélection) et crée de l'aléa moral. La continuité doit rester un <b>effet de la plomberie</b>, pas une promesse commerciale. Les filtres (prime ∝ avance, accès séquencé, garantie consignée) sont les barrières.</p>
     </div>
   </section>
 </main>

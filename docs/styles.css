@@ -76,5 +76,34 @@ section{padding:32px 22px}
 .kpi .val.ok{color:var(--ok)}.kpi .val.bad{color:var(--bad)}.kpi .val.brand{color:var(--brand)}
 .kpi small{color:var(--muted);font-size:.72rem}
 .chart-card canvas{width:100%;height:auto;display:block;background:var(--canvas);border-radius:6px}
+/* paramètres */
+.param-actions{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+.param-status{color:var(--muted);font-size:.85rem}
+.param-groupe{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;margin:12px 0}
+.param-groupe>h3{margin-top:0;color:var(--brand);display:flex;align-items:center;gap:8px}
+.param-groupe .grp-desc{color:var(--muted);font-size:.85rem;margin:-2px 0 12px}
+.param-row{display:grid;grid-template-columns:200px 1fr 110px;gap:14px;align-items:center;padding:9px 0;border-top:1px solid var(--line-2)}
+.param-row:first-of-type{border-top:none}
+.param-row .p-nom{font-weight:600;font-size:.9rem}
+.param-row .p-desc{color:var(--muted);font-size:.8rem;margin-top:1px}
+.param-row .p-ctrl{display:flex;align-items:center;gap:10px}
+.param-row input[type=range]{flex:1;accent-color:var(--brand)}
+.param-row .p-val{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:.82rem;text-align:right}
+.param-row select,.param-row .p-toggle{font-size:.85rem}
+.p-toggle{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.p-toggle button{border:none;background:var(--paper);padding:5px 12px;font-size:.8rem;cursor:pointer;color:var(--muted)}
+.p-toggle button.on{background:var(--brand);color:#fff}
+
+/* documentation */
+.doc{max-width:820px}
+.doc-bloc{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:18px 22px;margin:14px 0}
+.doc-bloc h3{margin-top:0;color:var(--brand)}
+.doc-bloc p{margin:8px 0}
+.doc-bloc ul,.doc-bloc ol{margin:8px 0;padding-left:22px}.doc-bloc li{margin:4px 0}
+.doc-bloc code{background:var(--canvas);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;font-size:.85em}
+.doc-bloc .formule{background:#f0f5f4;border-left:3px solid var(--brand);padding:10px 14px;font-family:'JetBrains Mono',monospace;font-size:.88rem;border-radius:0 6px 6px 0}
+.doc-bloc .exemple{background:#fff7e8;border-left:3px solid var(--gold);padding:10px 14px;border-radius:0 6px 6px 0;font-size:.9rem}
+.doc-bloc.note{background:#fdf6ec;border-color:#e2d4b8}
+
 footer{padding:22px;color:var(--muted);font-size:.8rem}
 @media(max-width:820px){.sim-grid{grid-template-columns:1fr}.cercle{grid-template-columns:repeat(5,1fr)}.explications{grid-template-columns:1fr}.hero h1{font-size:1.8rem}}
