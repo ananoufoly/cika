@@ -162,11 +162,12 @@ class ParamsStress:
 # ---------------------------------------------------------------------------
 @dataclass
 class ParamsPnLOperateur:
-    cout_acquisition_membre: float = 2_000.0
-    cout_ops_pool_mois: float = 5_000.0
-    couts_fixes_mensuels: float = 0.0   # SUPPRIMÉ : on isole l'économie unitaire (marge par
-                                        # pool). Les frais de structure relèvent du financement,
-                                        # hors du périmètre de ce modèle.
+    # P&L BRUT : aucun coût déduit. Les coûts (acquisition, ops, structure) relèvent du
+    # financement de l'entreprise, hors du périmètre du modèle produit. Le P&L = revenus
+    # bruts du mécanisme (primes Opérateur + surplus d'enchère).
+    cout_acquisition_membre: float = 0.0
+    cout_ops_pool_mois: float = 0.0
+    couts_fixes_mensuels: float = 0.0
     cout_capital_annuel: float = 0.10   # rémunération théorique du FGE immobilisé (pour ROE honnête)
 
 

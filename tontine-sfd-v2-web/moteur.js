@@ -45,8 +45,9 @@ export const DEFAUTS = {
   // stress
   comportemental_actif: false, choc_fuite: 0.0, bascule_urgents: 0.0,
   macro_actif: false, z_choc: 0.0, z_persistance: 0,
-  // P&L Opérateur (coût fixe SUPPRIMÉ)
-  cout_acquisition_membre: 2000, cout_ops_pool_mois: 5000, couts_fixes_mensuels: 0, cout_capital_annuel: 0.10,
+  // P&L BRUT : on n'inclut aucun coût (acquisition, ops, fixes). Les coûts relèvent de la
+  // structure et du financement, hors du périmètre. Le P&L = revenus bruts du mécanisme.
+  cout_acquisition_membre: 0, cout_ops_pool_mois: 0, couts_fixes_mensuels: 0, cout_capital_annuel: 0.10,
 };
 
 const rSfdMensuel = p => p.r_sfd_annuel / 12;

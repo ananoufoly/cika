@@ -180,8 +180,8 @@ function renderKPIs(a, p) {
   const pot = (p.m_membres - 1) * p.c;
   const items = [
     { l: 'Promesse tenue', v: pct(a.taux_continuite), c: a.taux_continuite >= 0.999 ? 'ok' : 'bad', s: 'tous les tours servis' },
-    { l: 'P&L Opérateur', v: fmtM(a.pnlOp.moy), c: a.pnlOp.moy > 0 ? 'ok' : 'bad', s: `${p.n_pools} pools` },
-    { l: 'Marge / pool', v: fmtM(a.margePool.moy), c: 'brand', s: 'rentable dès le 1ᵉʳ pool' },
+    { l: 'P&L brut Opérateur', v: fmtM(a.pnlOp.moy), c: a.pnlOp.moy > 0 ? 'ok' : 'bad', s: `${p.n_pools} pools · hors coûts` },
+    { l: 'Revenu brut / pool', v: fmtM(a.margePool.moy), c: 'brand', s: 'primes + surplus d\'enchère' },
     { l: 'Risque porté SFD', v: fmtM(a.perteSfd.moy), c: 'brand', s: 'avances non récupérées' },
     { l: 'Coût membre tour 1', v: pct(a.coutTour1.moy / pot), c: a.coutTour1.moy / pot < 0.2 ? 'ok' : 'brand', s: 'le dernier tour ≈ 0' },
     { l: 'Fuites moyennes', v: Math.round(a.fuites.moy), c: 'brand', s: 'bénéficiaires disparus' },
