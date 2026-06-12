@@ -71,6 +71,11 @@ section.alt{background:#0a0e15}
 .sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
 .sw.pos{background:var(--pos)} .sw.neg{background:var(--neg)} .sw.floor{background:var(--warn)}
 .sw.res{background:var(--accent2)} .sw.line{background:var(--warn)}
+.sw.inv{background:#3a8dff} .sw.floor2{background:#6f7c92}
+.reserve-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}
+.reserve-stats .rs{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center}
+.reserve-stats .rs .a{font-size:1.35rem;font-weight:800;color:var(--accent2)}
+.reserve-stats .rs .l{color:var(--muted);font-size:.8rem}
 
 /* money */
 .money-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}

@@ -46,7 +46,9 @@ function mean(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0
 export const DEFAULTS = {
   N: 12, c: 25000, num_cycles: 2,
   // auction / slot pricing
-  d_min: 0.02, bid_noise: 0.02, bid_above_ask: 0.03, auto_ask_price: true,
+  d_min: 0.30, d_max: 0.45, bid_noise: 0.02, bid_above_ask: 0.03, auto_ask_price: false,
+  // split model: every winner takes theta*P now, rest deferred to cycle-end, bid eats the deferred
+  split_fixed_half: true, theta_immediate: 0.50,
   // discount split
   fee_rate: 0.0, retain_theta: 0.70,
   // position escrow + lag
@@ -105,16 +107,33 @@ export function slotSchedule(p) {
   const P = potP(p);
   const rows = [];
   for (let slot = 0; slot < p.N; slot++) {
-    const e = escrowShareForSlot(p, slot);
-    const d = askPriceForSlot(p, slot);
-    const disc = d * P;
-    const immediate = (1 - e) * (P - disc);
-    const deferred = e * (P - disc);
-    const exitNet = immediate - disc - deferred; // <= 0 by construction
-    rows.push({
-      slot: slot + 1, escrow: e, askFrac: d, discount: disc,
-      immediate, deferred, lag: lagForSlot(p, slot, p.N - 1 - slot), exitNet,
-    });
+    if (p.split_fixed_half) {
+      // Fixed-immediate model: immediate = theta*P (same for all). The asking price
+      // (bid) is a slot-dependent schedule that scales from d_max (slot 1) to d_min
+      // (last slot); it is subtracted from the deferred half and feeds the reserve.
+      const frac = p.N > 1 ? slot / (p.N - 1) : 0;
+      const d = p.d_max + (p.d_min - p.d_max) * frac;   // d_max at slot 0 -> d_min at last
+      const disc = d * P;
+      const immediate = p.theta_immediate * P;
+      const deferred = Math.max(0, (1 - p.theta_immediate) * P - disc);
+      const exitNet = immediate - disc - deferred; // = 0 by construction (deferred forfeits)
+      rows.push({
+        slot: slot + 1, escrow: (1 - p.theta_immediate), askFrac: d, discount: disc,
+        immediate, deferred, lag: p.N - 1 - slot, exitNet,
+        toReserve: disc, // the bid that flows to the reserve/pool
+      });
+    } else {
+      const e = escrowShareForSlot(p, slot);
+      const d = askPriceForSlot(p, slot);
+      const disc = d * P;
+      const immediate = (1 - e) * (P - disc);
+      const deferred = e * (P - disc);
+      const exitNet = immediate - disc - deferred;
+      rows.push({
+        slot: slot + 1, escrow: e, askFrac: d, discount: disc,
+        immediate, deferred, lag: lagForSlot(p, slot, p.N - 1 - slot), exitNet, toReserve: disc,
+      });
+    }
   }
   return rows;
 }
@@ -263,11 +282,19 @@ export function runPath(p, seed, pBase) {
       const winnerSlot = slotInCycle; slotInCycle++;
       const m = byId[winner]; m.wonTurn = t;
       const entitlement = P - discount;
-      const eShare = escrowShareForSlot(p, winnerSlot);
       const turnsLeft = N - 1 - winnerSlot;
-      const eLag = lagForSlot(p, winnerSlot, turnsLeft);
-      winnerDef = eShare * entitlement;
-      let immGross = entitlement - winnerDef;
+      let eLag, immGross;
+      if (p.split_fixed_half) {
+        // fixed-immediate half; bid eats the deferred half; deferred unlocks at cycle-end
+        eLag = Math.max(0, turnsLeft);
+        immGross = p.theta_immediate * P;
+        winnerDef = Math.max(0, (1 - p.theta_immediate) * P - discount);
+      } else {
+        const eShare = escrowShareForSlot(p, winnerSlot);
+        eLag = lagForSlot(p, winnerSlot, turnsLeft);
+        winnerDef = eShare * entitlement;
+        immGross = entitlement - winnerDef;
+      }
       // shrink (arrears) on immediate leg
       const shrink = Math.min(p.shrink_cap * p.c, m.arrears);
       winnerImm = Math.max(0, immGross - shrink);
@@ -418,7 +445,8 @@ function isEligible(p, m) {
 function slotDiscountBaseline(p, slot) {
   if (p.N <= 1) return p.d_min;
   const frac = slot / (p.N - 1);
-  return 0.22 + (p.d_min - 0.22) * frac; // legacy curve when auto-ask off
+  const hi = p.split_fixed_half ? p.d_max : 0.22;
+  return hi + (p.d_min - hi) * frac; // d_max at slot 0 -> d_min at last slot
 }
 
 // ---- Monte Carlo across many paths ----

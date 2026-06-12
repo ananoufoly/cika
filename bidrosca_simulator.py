@@ -95,7 +95,17 @@ class BidROSCAParams:
     member_yield_share: float = 0.75    # share of NET yield distributed to members
     invest_break_cost: float = 0.0      # fractional cost to redeem the sleeve early (0..1)
 
-    # --- winner's deferred fraction (mirrors CLCS: take a fraction now, rest deferred) ---
+    # --- SPLIT MODEL: fixed-immediate half, bid eats the deferred half ---
+    # When split_fixed_half is on, every winner takes the SAME immediate slice
+    # (theta_immediate * P, e.g. half the pot) regardless of slot. The other
+    # (1-theta)*P is DEFERRED and unlocks at cycle-end. The winner's bid (discount)
+    # is subtracted from their own deferred half and flows to the income pool
+    # (reserve/dividend/fee). Because deferred forfeits on exit, early-exit nets
+    # exactly 0 for any bid -> the asking price is a pure revenue lever, not a gate.
+    split_fixed_half: bool = False
+    theta_immediate: float = 0.50       # immediate share of the pot (rest deferred)
+
+    # --- winner's deferred fraction (legacy model, used when split_fixed_half is off) ---
     # The winner is entitled to (1 - discount_frac) of the pot.  Of THAT entitlement,
     # `winner_defer_share` is escrowed (vested after a lag, forfeited on exit) and the
     # rest is paid immediately.  0 = winner takes their whole entitlement now.
@@ -628,14 +638,21 @@ class BidROSCASimulator:
                 m_w = members[winner]
                 m_w.won_turn = t
 
-                # winner's entitlement = pot minus the discount they bid away
                 winner_entitlement = p.P - discount
-                # position-dependent escrow: earliest slots hold back the most
-                esc_share = self._escrow_share_for_slot(winner_slot)
                 turns_left = p.N - 1 - winner_slot   # turns remaining in this cycle
-                esc_lag = self._lag_for_slot(winner_slot, turns_left)
-                winner_deferred = esc_share * winner_entitlement
-                winner_immediate_gross = winner_entitlement - winner_deferred
+
+                if p.split_fixed_half:
+                    # Fixed-immediate half; bid is subtracted from the deferred half.
+                    # immediate = theta*P (same for everyone); deferred = (1-theta)*P - bid.
+                    esc_lag = max(0, turns_left)     # deferred unlocks at cycle-end
+                    winner_immediate_gross = p.theta_immediate * p.P
+                    winner_deferred = max(0.0, (1.0 - p.theta_immediate) * p.P - discount)
+                else:
+                    # legacy: position-dependent escrow on the (P-discount) entitlement
+                    esc_share = self._escrow_share_for_slot(winner_slot)
+                    esc_lag = self._lag_for_slot(winner_slot, turns_left)
+                    winner_deferred = esc_share * winner_entitlement
+                    winner_immediate_gross = winner_entitlement - winner_deferred
 
                 # arrears shrink applies to the immediate cash leg only
                 winner_immediate, shrink = self._apply_shrink(m_w, winner_immediate_gross)

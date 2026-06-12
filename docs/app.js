@@ -3,6 +3,7 @@ import { DEFAULTS, runPath, runMonteCarlo, slotSchedule, potP, dividendShare } f
 const fmt = (x) => Math.round(x).toLocaleString('en-US');
 const fmtK = (x) => Math.abs(x) >= 1e6 ? (x/1e6).toFixed(2)+'M' : Math.abs(x)>=1e3 ? Math.round(x/1e3)+'k' : Math.round(x).toString();
 const pct = (x) => (x*100).toFixed(x*100<1?1:0)+'%';
+const mean = (a) => a.length ? a.reduce((s,x)=>s+x,0)/a.length : 0;
 const $ = (id) => document.getElementById(id);
 
 // ---- state ----
@@ -100,6 +101,7 @@ function runSim() {
     renderKPIs(lastMC);
     drawHistogram(lastMC.memberNets, P);
     drawReserve(lastPath, P);
+    renderReserveFlow(lastPath, P);
     renderMoney(lastMC);
     $('runBtn').textContent='▶ Run simulation';
   }, 30);
@@ -216,12 +218,68 @@ function renderSlots() {
   tb.innerHTML = sch.map(r=>`
     <tr>
       <td>#${r.slot}</td>
-      <td>${pct(r.escrow)}</td>
-      <td>${pct(r.askFrac)} · ${fmt(r.discount)}</td>
       <td>${fmt(r.immediate)}</td>
+      <td>${pct(r.askFrac)} · ${fmt(r.discount)}</td>
       <td>${fmt(r.deferred)}</td>
+      <td class="ok">${fmt(r.toReserve)}</td>
       <td>${r.lag} mo</td>
       <td class="${r.exitNet<=1?'ok':'neg'}">${r.exitNet>0?'+':''}${fmt(r.exitNet)}</td>
+    </tr>`).join('');
+}
+
+// ---- reserve movement (uses lastPath) ----
+function renderReserveFlow(path, p) {
+  if (!path) return;
+  const rows = path.rows;
+  // chart
+  const cv=$('reserveFlowCanvas'), ctx=cv.getContext('2d');
+  const W=cv.width,H=cv.height,pad=40; ctx.clearRect(0,0,W,H);
+  const maxV=Math.max(...rows.map(r=>r.R), ...rows.map(r=>r.Ldrawn), p.invest_liquid_floor, 1)*1.05;
+  const xs=i=>pad+(i/(rows.length-1))*(W-pad-10);
+  const ys=v=>H-24-(v/maxV)*(H-40);
+  // liquid floor line
+  ctx.strokeStyle='#6f7c92';ctx.setLineDash([5,5]);ctx.lineWidth=1;ctx.beginPath();
+  ctx.moveTo(pad,ys(p.invest_liquid_floor));ctx.lineTo(W-10,ys(p.invest_liquid_floor));ctx.stroke();ctx.setLineDash([]);
+  // reserve area
+  ctx.beginPath();ctx.moveTo(xs(0),ys(0));rows.forEach((r,i)=>ctx.lineTo(xs(i),ys(r.R)));
+  ctx.lineTo(xs(rows.length-1),ys(0));ctx.closePath();ctx.fillStyle='rgba(0,194,168,.16)';ctx.fill();
+  // reserve line
+  ctx.strokeStyle='#00c2a8';ctx.lineWidth=2.2;ctx.beginPath();
+  rows.forEach((r,i)=>i?ctx.lineTo(xs(i),ys(r.R)):ctx.moveTo(xs(i),ys(r.R)));ctx.stroke();
+  // invested (placed) portion = R - floor (clamped)
+  ctx.strokeStyle='#3a8dff';ctx.lineWidth=1.6;ctx.setLineDash([3,3]);ctx.beginPath();
+  rows.forEach((r,i)=>{const v=Math.max(0,r.R-p.invest_liquid_floor);return i?ctx.lineTo(xs(i),ys(v)):ctx.moveTo(xs(i),ys(v));});ctx.stroke();ctx.setLineDash([]);
+  // bank line drawn
+  ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.beginPath();
+  rows.forEach((r,i)=>i?ctx.lineTo(xs(i),ys(r.Ldrawn)):ctx.moveTo(xs(i),ys(r.Ldrawn)));ctx.stroke();
+  // cycle separators
+  ctx.fillStyle='#9aa7bd';ctx.font='11px sans-serif';
+  for(let c=1;c<p.num_cycles;c++){const x=xs(c*p.N-1);ctx.strokeStyle='#26303f';ctx.setLineDash([2,3]);ctx.beginPath();ctx.moveTo(x,8);ctx.lineTo(x,H-22);ctx.stroke();ctx.setLineDash([]);}
+  ctx.textAlign='left';ctx.fillText(fmtK(maxV),4,16);ctx.fillText('floor '+fmtK(p.invest_liquid_floor),pad+4,ys(p.invest_liquid_floor)-4);
+  ctx.textAlign='center';ctx.fillText('month →',W/2,H-6);
+
+  // stats
+  const placed = rows.map(r=>Math.max(0,r.R-p.invest_liquid_floor));
+  const stats=[
+    {l:'Peak reserve',a:fmtK(Math.max(...rows.map(r=>r.R)))},
+    {l:'Avg placed (earning)',a:fmtK(mean(placed))},
+    {l:'Total bids → reserve',a:fmtK(rows.reduce((s,r)=>s+(r.discount||0),0))},
+    {l:'Max bank-line draw',a:fmtK(Math.max(...rows.map(r=>r.Ldrawn)))},
+  ];
+  $('reserveStats').innerHTML=stats.map(s=>`<div class="rs"><div class="a">${s.a}</div><div class="l">${s.l}</div></div>`).join('');
+
+  // ledger table (first cycle)
+  const tb=$('reserveTable').querySelector('tbody');
+  tb.innerHTML=rows.slice(0,p.N).map(r=>`
+    <tr class="${r.winner!==null?'win':''}">
+      <td>${r.t}</td>
+      <td>${r.winner!==null?'#'+r.winner:'—'}</td>
+      <td class="ok">${fmt(r.discount||0)}</td>
+      <td>${r.shortfall>1?fmt(r.shortfall):'—'}</td>
+      <td>${r.drawRes>1?fmt(r.drawRes):'—'}</td>
+      <td class="${r.drawBank>1?'neg':''}">${r.drawBank>1?fmt(r.drawBank):'—'}</td>
+      <td>${fmt(Math.max(0,r.R-p.invest_liquid_floor))}</td>
+      <td><b>${fmt(r.R)}</b></td>
     </tr>`).join('');
 }
 

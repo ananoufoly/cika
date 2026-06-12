@@ -28,6 +28,7 @@
   <a href="#sim" class="tab">2 · Live simulator</a>
   <a href="#money" class="tab">3 · Who earns what</a>
   <a href="#slots" class="tab">4 · Slot pricing</a>
+  <a href="#reserve" class="tab">4b · Reserve flow</a>
   <a href="#options" class="tab">5 · CIKA &amp; bank options</a>
 </nav>
 
@@ -104,10 +105,33 @@
   <p class="lead">Each position has an automatically-solved minimum asking price. It is set so that taking the pot early and then leaving nets <b>≤ 0</b> — making "stay to the end" the dominant strategy at every slot. Early slots cost more and hold back more, for longer; the last slot holds back nothing.</p>
   <div class="card table-card">
     <table id="slotTable"><thead><tr>
-      <th>Slot</th><th>Held back (escrow)</th><th>Asking price</th><th>Immediate</th><th>Deferred</th><th>Unlock lag</th><th>Net if you quit</th>
+      <th>Slot</th><th>Immediate (you get now)</th><th>Asking price (bid)</th><th>Deferred (unlocks at end)</th><th>→ to reserve</th><th>Unlock lag</th><th>Net if you quit</th>
     </tr></thead><tbody></tbody></table>
   </div>
-  <p class="note">"Net if you quit" ≤ 0 at every slot is the engineering guarantee that the circle cannot be gamed by taking-and-running.</p>
+  <p class="note"><b>Every winner takes the same immediate slice</b> (half the pot). The asking price (bid) is subtracted from your own deferred half and flows into the reserve. Early slots cost more (you pay to go first); the last slot pays least and keeps its full deferred. <b>"Net if you quit" = 0 at every slot</b> — the deferred half forfeits on exit, so taking-and-running never beats staying.</p>
+</section>
+
+<!-- 4b · RESERVE MOVEMENT -->
+<section id="reserve" class="wrap">
+  <h2>4b · How the reserve moves</h2>
+  <p class="lead">The reserve is the engine of the whole product: it absorbs missed-payment shocks (solvency) and, while idle, is placed with the bank treasury to generate the distribution. Here is how it fills and drains across one representative circle.</p>
+  <div class="card chart-card">
+    <h3>Reserve balance, treasury-placed portion, and bank-line draws <span class="hint">FCFA, per month</span></h3>
+    <canvas id="reserveFlowCanvas" width="900" height="260"></canvas>
+    <div class="legend">
+      <span class="sw res"></span>reserve balance
+      <span class="sw inv"></span>placed with bank (earning)
+      <span class="sw line"></span>bank line drawn
+      <span class="sw floor2"></span>liquid floor
+    </div>
+  </div>
+  <div class="reserve-stats" id="reserveStats"></div>
+  <div class="card table-card">
+    <h3>Per-month reserve ledger <span class="hint">representative path · first cycle</span></h3>
+    <table id="reserveTable"><thead><tr>
+      <th>Mo</th><th>Winner</th><th>Bid → reserve</th><th>Shortfall covered</th><th>From reserve</th><th>From bank line</th><th>Placed (earning)</th><th>Reserve end</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
 </section>
 
 <!-- 5 · OPTIONS -->
