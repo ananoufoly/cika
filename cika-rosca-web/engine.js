@@ -46,7 +46,9 @@ function mean(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0
 export const DEFAULTS = {
   N: 12, c: 25000, num_cycles: 2,
   // auction / slot pricing
-  d_min: 0.30, d_max: 0.45, bid_noise: 0.02, bid_above_ask: 0.03, auto_ask_price: false,
+  d_min: 0.02, d_max: 0.45, bid_noise: 0.02, bid_above_ask: 0.03, auto_ask_price: false,
+  // OPEN time-value auction: members bid the time-value of early access; price emerges
+  open_auction: true, rho_monthly: 0.02, bid_need_sigma: 0.25, reserve_price_frac: 0.0,
   // split model: every winner takes theta*P now, rest deferred to cycle-end, bid eats the deferred
   split_fixed_half: true, theta_immediate: 0.50,
   // discount split
@@ -108,11 +110,13 @@ export function slotSchedule(p) {
   const rows = [];
   for (let slot = 0; slot < p.N; slot++) {
     if (p.split_fixed_half) {
-      // Fixed-immediate model: immediate = theta*P (same for all). The asking price
-      // (bid) is a slot-dependent schedule that scales from d_max (slot 1) to d_min
-      // (last slot); it is subtracted from the deferred half and feeds the reserve.
-      const frac = p.N > 1 ? slot / (p.N - 1) : 0;
-      const d = p.d_max + (p.d_min - p.d_max) * frac;   // d_max at slot 0 -> d_min at last
+      // Fixed-immediate model: immediate = theta*P (same for all). The expected bid is
+      // the TIME-VALUE of early access (open auction): rho * months_saved * immediate.
+      // It is subtracted from the deferred half and feeds the reserve.
+      const monthsSaved = Math.max(0, (p.N - 1) - slot);
+      const d = p.open_auction
+        ? Math.min(1 - p.theta_immediate, p.rho_monthly * monthsSaved * p.theta_immediate)
+        : (p.d_max + (p.d_min - p.d_max) * (p.N > 1 ? slot / (p.N - 1) : 0));
       const disc = d * P;
       const immediate = p.theta_immediate * P;
       const deferred = Math.max(0, (1 - p.theta_immediate) * P - disc);
@@ -254,7 +258,19 @@ export function runPath(p, seed, pBase) {
     const eligible = queue.filter(id => isEligible(p, byId[id]));
     let winner = null, discFrac = 0;
     if (eligible.length) {
-      if (p.auto_ask_price) {
+      if (p.open_auction) {
+        // Open time-value auction: willingness = rho * months_saved * immediate_sum,
+        // scaled by a private liquidity-need multiplier. Highest bidder wins at their bid.
+        const monthsSaved = Math.max(0, (N - 1) - slotInCycle);
+        const baseFrac = p.rho_monthly * monthsSaved * p.theta_immediate;
+        let best = -1;
+        for (const id of eligible) {
+          const priv = Math.exp(gaussian(rng) * p.bid_need_sigma);
+          const wtp = baseFrac * priv;
+          if (wtp > best) { best = wtp; winner = id; }
+        }
+        discFrac = clip(best, 0, 1 - p.theta_immediate);
+      } else if (p.auto_ask_price) {
         const ask = askPriceForSlot(p, slotInCycle);
         let best = -1;
         for (const id of eligible) {

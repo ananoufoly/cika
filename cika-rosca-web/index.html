@@ -9,8 +9,8 @@
 <body>
 <header class="hero">
   <div class="wrap">
-    <div class="brand">CIKA<span>·</span>Circle</div>
-    <h1>A bid-allocation rotating circle, engineered to be solvent and bank-partnerable</h1>
+    <div class="brand">CIKA<small>Circle · Engine &amp; Economics</small></div>
+    <h1 class="num">A bid-allocation rotating circle, engineered to be solvent and bank-partnerable</h1>
     <p class="sub">An interactive model of the mechanism, its solvency, and the economics for members, CIKA, and a bank partner. Every number on this page is computed live by the actual engine running in your browser.</p>
     <div class="pills">
       <span class="pill">No upfront capital</span>
@@ -60,6 +60,8 @@
       <label>Monthly contribution (FCFA): <output id="oc"></output><input type="range" id="cc" min="5000" max="100000" step="5000"></label>
       <label>Cycles (lifespan = N × cycles months): <output id="ocyc"></output><input type="range" id="ccyc" min="1" max="4" step="1"></label>
       <hr>
+      <label>Members' cost of money (ρ, monthly): <output id="orho"></output><input type="range" id="crho" min="0.005" max="0.06" step="0.005"></label>
+      <span class="hint">drives how much members bid for early access — the price emerges from the open auction</span>
       <label>Treasury yield (gross annual): <output id="oyld"></output><input type="range" id="cyld" min="0" max="0.20" step="0.01"></label>
       <label>Member share of distribution: <output id="oms"></output><input type="range" id="cms" min="0.5" max="1.0" step="0.05"></label>
       <hr>
@@ -101,8 +103,8 @@
 
 <!-- 4 · SLOT PRICING -->
 <section id="slots" class="wrap alt">
-  <h2>4 · Slot pricing schedule</h2>
-  <p class="lead">Each position has an automatically-solved minimum asking price. It is set so that taking the pot early and then leaving nets <b>≤ 0</b> — making "stay to the end" the dominant strategy at every slot. Early slots cost more and hold back more, for longer; the last slot holds back nothing.</p>
+  <h2>4 · Slot pricing — an open auction</h2>
+  <p class="lead">We do <b>not</b> fix the price. Members bid for early access in an open auction; the price emerges from competition and reflects the <b>time-value of receiving the lump sum months earlier</b> (driven by ρ, members' cost of money). Early slots naturally bid more (they save the most waiting); the last slot bids ~0. The table below shows the <b>expected</b> bid per slot at the current ρ.</p>
   <div class="card table-card">
     <table id="slotTable"><thead><tr>
       <th>Slot</th><th>Immediate (you get now)</th><th>Asking price (bid)</th><th>Deferred (unlocks at end)</th><th>→ to reserve</th><th>Unlock lag</th><th>Net if you quit</th>

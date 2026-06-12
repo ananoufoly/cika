@@ -132,6 +132,18 @@ class BidROSCAParams:
     auto_ask_price: bool = False
     bid_above_ask: float = 0.04       # mean extra discount bid above the asking price (competition)
 
+    # --- OPEN time-value auction (members set the price; we set a reserve floor) ---
+    # When on, the bid is NOT a fixed schedule.  Each member's willingness to bid for a
+    # slot = rho_monthly * months_saved * immediate_sum, i.e. the time-value of receiving
+    # the lump sum that many months earlier than waiting to the last slot, plus a private
+    # liquidity-need multiplier and noise.  The highest bidder wins at their bid (the price
+    # EMERGES from competition).  reserve_price_frac is OUR minimum acceptable bid (floor);
+    # below it the slot still clears but is flagged sub-reserve (we'd rely on the bank).
+    open_auction: bool = False
+    rho_monthly: float = 0.02         # member monthly cost-of-money (time value of early cash)
+    bid_need_sigma: float = 0.25      # spread of private liquidity-need multipliers (lognormal-ish)
+    reserve_price_frac: float = 0.0   # our minimum acceptable bid as a fraction of the pot
+
     # --- escrow on the dividend (optional deferral, mirrors CLCS delta) ---
     # Fraction of each member's per-turn dividend that is escrowed (vested after
     # K periods, forfeited on exit).  0 = pay dividends immediately.
@@ -334,6 +346,23 @@ class BidROSCASimulator:
         """
         if not eligible:
             return None, 0.0
+        if self.p.open_auction:
+            # Open time-value auction: each member's willingness = time-value of getting
+            # the immediate sum `months_saved` months early, scaled by a private need.
+            N = self.p.N
+            months_saved = max(0, (N - 1) - slot_idx_in_cycle)
+            base_frac = self.p.rho_monthly * months_saved * self.p.theta_immediate
+            best_mid, best_bid = None, -1.0
+            for mid in eligible:
+                need = float(bid_need.get(mid, 1.0)) if bid_need else 1.0
+                # private need multiplier ~ lognormal around 1.0
+                priv = float(np.exp(rng.normal(0.0, self.p.bid_need_sigma)))
+                wtp = base_frac * need * priv
+                if wtp > best_bid:
+                    best_bid, best_mid = wtp, mid
+            # winner pays their willingness-to-pay (clipped); price emerges from demand
+            best_bid = float(np.clip(best_bid, 0.0, 1.0 - self.p.theta_immediate))
+            return best_mid, best_bid
         if self.p.auto_ask_price:
             # Bids start at the auto-solved asking price (the gate) and compete above it.
             ask = self._ask_price_for_slot(slot_idx_in_cycle)

@@ -21,10 +21,10 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 const flowSteps = [
   { title:'Contributions', sub:'12 members × 25,000', key:'C',
     desc:'Every member pays their monthly contribution. The pot for this turn is N × c.' },
-  { title:'Auction', sub:'bid for the slot', key:'auction',
-    desc:'Members bid (forgo a discount) to take the pot now. Each slot has an auto-solved minimum price.' },
-  { title:'Allocation', sub:'fraction now + deferred', key:'alloc',
-    desc:'The winner takes an immediate slice; the rest is held in escrow, unlocked only if they stay to the end.' },
+  { title:'Open auction', sub:'members bid the time-value', key:'auction',
+    desc:'Members bid for early access — the price emerges from competition, set by the time-value of getting the lump sum months earlier. We set only a reserve floor.' },
+  { title:'Allocation', sub:'flat sum now + deferred − bid', key:'alloc',
+    desc:'Every winner takes the SAME immediate sum; the rest is deferred to cycle-end, minus their bid. Leaving early forfeits the deferred, so quitting never pays.' },
   { title:'Reserve', sub:'absorbs shocks · placed with bank', key:'reserve',
     desc:'The discount + surplus build a reserve that covers missed payments and is placed with the bank treasury between payouts.' },
   { title:'Distribution', sub:'shared with members', key:'dist',
@@ -37,8 +37,8 @@ function renderFlow() {
   const s0 = sch[0];
   const vals = {
     C: fmt(pot)+' FCFA',
-    auction: 'slot 1 asks '+pct(s0.askFrac),
-    alloc: fmt(s0.immediate)+' now / '+fmt(s0.deferred)+' held',
+    auction: 'slot 1 bids ~'+pct(s0.askFrac),
+    alloc: fmt(s0.immediate)+' now / '+fmt(s0.deferred)+' deferred',
     reserve: '~'+fmtK(s0.discount)+' to reserve',
     dist: pct(P.member_yield_share)+' to members',
   };
@@ -68,6 +68,7 @@ const bindings = [
 ];
 function syncControls() {
   $('cN').value=P.N; $('cc').value=P.c; $('ccyc').value=P.num_cycles;
+  $('crho').value=P.rho_monthly;
   $('cyld').value=P.invest_yield_annual; $('cms').value=P.member_yield_share;
   $('cline').value=P.bank_line; $('cpb').value=(P.p_lo+P.p_hi)/2; $('cpaths').value=P._paths||800;
   updateOutputs();
@@ -75,6 +76,7 @@ function syncControls() {
 function updateOutputs() {
   $('oN').textContent=P.N; $('oc').textContent=fmt(P.c);
   $('ocyc').textContent=P.num_cycles+' ('+(P.N*P.num_cycles)+' mo)';
+  $('orho').textContent=(P.rho_monthly*100).toFixed(1)+'%/mo';
   $('oyld').textContent=pct(P.invest_yield_annual); $('oms').textContent=pct(P.member_yield_share);
   $('oline').textContent=fmt(P.bank_line); $('opb').textContent=pct((P.p_lo+P.p_hi)/2);
   $('opaths').textContent=P._paths||800;
@@ -82,6 +84,7 @@ function updateOutputs() {
 $('cN').addEventListener('input',e=>{P.N=+e.target.value;updateOutputs();renderFlow();renderSlots();});
 $('cc').addEventListener('input',e=>{P.c=+e.target.value;updateOutputs();renderFlow();renderSlots();});
 $('ccyc').addEventListener('input',e=>{P.num_cycles=+e.target.value;updateOutputs();});
+$('crho').addEventListener('input',e=>{P.rho_monthly=+e.target.value;updateOutputs();renderFlow();renderSlots();});
 $('cyld').addEventListener('input',e=>{P.invest_yield_annual=+e.target.value;updateOutputs();});
 $('cms').addEventListener('input',e=>{P.member_yield_share=+e.target.value;updateOutputs();});
 $('cline').addEventListener('input',e=>{P.bank_line=+e.target.value;updateOutputs();});
@@ -140,12 +143,12 @@ function drawHistogram(nets, p) {
   counts.forEach((c,i)=>{
     const x=pad+i*bw, h=(c/maxc)*(H-40);
     const binMid=lo+(i+0.5)*w;
-    ctx.fillStyle = binMid>=0?'#22c55e':(binMid<=floorVal+w?'#f59e0b':'#ef4444');
+    ctx.fillStyle = binMid>=0?'#15803d':(binMid<=floorVal+w?'#b18a3a':'#b91c1c');
     ctx.fillRect(x,H-20-h,bw-1,h);
   });
   // zero axis
-  ctx.strokeStyle='#9aa7bd'; ctx.setLineDash([4,4]); ctx.beginPath();ctx.moveTo(zx,8);ctx.lineTo(zx,H-18);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#9aa7bd';ctx.font='11px sans-serif';ctx.textAlign='center';
+  ctx.strokeStyle='#5b6b87'; ctx.setLineDash([4,4]); ctx.beginPath();ctx.moveTo(zx,8);ctx.lineTo(zx,H-18);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle='#5b6b87';ctx.font='11px sans-serif';ctx.textAlign='center';
   ctx.fillText('break-even',zx,H-4);
   ctx.textAlign='left';ctx.fillText(fmtK(lo),pad,H-4);
   ctx.textAlign='right';ctx.fillText(fmtK(hi),W-4,H-4);
@@ -163,14 +166,14 @@ function drawReserve(path, p) {
   ctx.beginPath();ctx.moveTo(xs(0),ys(0));
   rows.forEach((r,i)=>ctx.lineTo(xs(i),ys(r.R)));
   ctx.lineTo(xs(rows.length-1),ys(0));ctx.closePath();
-  ctx.fillStyle='rgba(0,194,168,.18)';ctx.fill();
-  ctx.strokeStyle='#00c2a8';ctx.lineWidth=2;ctx.beginPath();
+  ctx.fillStyle='rgba(15,76,74,.10)';ctx.fill();
+  ctx.strokeStyle='#0f4c4a';ctx.lineWidth=2;ctx.beginPath();
   rows.forEach((r,i)=>i?ctx.lineTo(xs(i),ys(r.R)):ctx.moveTo(xs(i),ys(r.R)));ctx.stroke();
   // bank line drawn
-  ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.beginPath();
+  ctx.strokeStyle='#b18a3a';ctx.lineWidth=2;ctx.beginPath();
   rows.forEach((r,i)=>i?ctx.lineTo(xs(i),ys(r.Ldrawn)):ctx.moveTo(xs(i),ys(r.Ldrawn)));ctx.stroke();
   // axes
-  ctx.fillStyle='#9aa7bd';ctx.font='11px sans-serif';ctx.textAlign='left';
+  ctx.fillStyle='#5b6b87';ctx.font='11px sans-serif';ctx.textAlign='left';
   ctx.fillText(fmtK(maxR),4,16);ctx.fillText('0',4,H-20);
   ctx.textAlign='center';ctx.fillText('month →',W/2,H-4);
 }
@@ -238,23 +241,23 @@ function renderReserveFlow(path, p) {
   const xs=i=>pad+(i/(rows.length-1))*(W-pad-10);
   const ys=v=>H-24-(v/maxV)*(H-40);
   // liquid floor line
-  ctx.strokeStyle='#6f7c92';ctx.setLineDash([5,5]);ctx.lineWidth=1;ctx.beginPath();
+  ctx.strokeStyle='#5b6b87';ctx.setLineDash([5,5]);ctx.lineWidth=1;ctx.beginPath();
   ctx.moveTo(pad,ys(p.invest_liquid_floor));ctx.lineTo(W-10,ys(p.invest_liquid_floor));ctx.stroke();ctx.setLineDash([]);
   // reserve area
   ctx.beginPath();ctx.moveTo(xs(0),ys(0));rows.forEach((r,i)=>ctx.lineTo(xs(i),ys(r.R)));
-  ctx.lineTo(xs(rows.length-1),ys(0));ctx.closePath();ctx.fillStyle='rgba(0,194,168,.16)';ctx.fill();
+  ctx.lineTo(xs(rows.length-1),ys(0));ctx.closePath();ctx.fillStyle='rgba(15,76,74,.10)';ctx.fill();
   // reserve line
-  ctx.strokeStyle='#00c2a8';ctx.lineWidth=2.2;ctx.beginPath();
+  ctx.strokeStyle='#0f4c4a';ctx.lineWidth=2.2;ctx.beginPath();
   rows.forEach((r,i)=>i?ctx.lineTo(xs(i),ys(r.R)):ctx.moveTo(xs(i),ys(r.R)));ctx.stroke();
   // invested (placed) portion = R - floor (clamped)
-  ctx.strokeStyle='#3a8dff';ctx.lineWidth=1.6;ctx.setLineDash([3,3]);ctx.beginPath();
+  ctx.strokeStyle='#14706c';ctx.lineWidth=1.6;ctx.setLineDash([3,3]);ctx.beginPath();
   rows.forEach((r,i)=>{const v=Math.max(0,r.R-p.invest_liquid_floor);return i?ctx.lineTo(xs(i),ys(v)):ctx.moveTo(xs(i),ys(v));});ctx.stroke();ctx.setLineDash([]);
   // bank line drawn
-  ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.beginPath();
+  ctx.strokeStyle='#b18a3a';ctx.lineWidth=2;ctx.beginPath();
   rows.forEach((r,i)=>i?ctx.lineTo(xs(i),ys(r.Ldrawn)):ctx.moveTo(xs(i),ys(r.Ldrawn)));ctx.stroke();
   // cycle separators
-  ctx.fillStyle='#9aa7bd';ctx.font='11px sans-serif';
-  for(let c=1;c<p.num_cycles;c++){const x=xs(c*p.N-1);ctx.strokeStyle='#26303f';ctx.setLineDash([2,3]);ctx.beginPath();ctx.moveTo(x,8);ctx.lineTo(x,H-22);ctx.stroke();ctx.setLineDash([]);}
+  ctx.fillStyle='#5b6b87';ctx.font='11px sans-serif';
+  for(let c=1;c<p.num_cycles;c++){const x=xs(c*p.N-1);ctx.strokeStyle='#e4e9f2';ctx.setLineDash([2,3]);ctx.beginPath();ctx.moveTo(x,8);ctx.lineTo(x,H-22);ctx.stroke();ctx.setLineDash([]);}
   ctx.textAlign='left';ctx.fillText(fmtK(maxV),4,16);ctx.fillText('floor '+fmtK(p.invest_liquid_floor),pad+4,ys(p.invest_liquid_floor)-4);
   ctx.textAlign='center';ctx.fillText('month →',W/2,H-6);
 
