@@ -133,6 +133,11 @@ tr.win:hover td{background:#dcecea}
 footer{padding:24px;color:var(--muted);font-size:.8rem;border-bottom:none}
 .label.inline,label.inline{display:block}
 .controls h3,.compare-card h3{font-size:.82rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.seg{display:flex;gap:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0}
+.seg-btn{flex:1;background:var(--paper);border:none;padding:8px;font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;transition:.15s}
+.seg-btn:hover{background:var(--canvas)}
+.seg-btn.active{background:var(--brand);color:#fff}
+.seg-btn:first-child{border-right:1px solid var(--line)}
 
 @media(max-width:880px){
   .sim-grid{grid-template-columns:1fr}

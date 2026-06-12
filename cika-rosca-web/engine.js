@@ -68,9 +68,17 @@ export const DEFAULTS = {
   // discipline
   strict_cashrun: true, enable_replacement: true, replacement_delay: 1,
   probation_q: 2, miss_streak_out: 3, shrink_cap: 2.0,
-  // stochastic stress (UEMOA realistic)
-  p_lo: 0.85, p_hi: 0.92,
-  shock_windows: [[5, 7, 0.85], [17, 19, 0.85]],
+  // stochastic scenario — DEFAULT is central (normal conditions).
+  // The page exposes a Central / Stressed toggle; stressed lowers discipline and
+  // adds two lean-season shock windows.
+  p_lo: 0.92, p_hi: 0.97,
+  shock_windows: [],
+};
+
+// Scenario presets used by the page toggle.
+export const SCENARIOS = {
+  central:  { p_lo: 0.92, p_hi: 0.97, shock_windows: [] },
+  stressed: { p_lo: 0.85, p_hi: 0.92, shock_windows: [[5, 7, 0.85], [17, 19, 0.85]] },
 };
 
 // ---- derived helpers ----

@@ -55,6 +55,13 @@
   <p class="lead">Adjust the design and run a real Monte Carlo in your browser (no server). The central UEMOA-realistic scenario uses partial-payment stress with two lean-season dips.</p>
   <div class="sim-grid">
     <div class="controls card">
+      <h3>Scenario</h3>
+      <div class="seg" id="scenarioSeg">
+        <button class="seg-btn active" data-scen="central">Central</button>
+        <button class="seg-btn" data-scen="stressed">Stressed</button>
+      </div>
+      <span class="hint" id="scenarioHint"></span>
+      <hr>
       <h3>Design levers</h3>
       <label>Members in circle (N): <output id="oN"></output><input type="range" id="cN" min="6" max="24" step="1"></label>
       <label>Monthly contribution (FCFA): <output id="oc"></output><input type="range" id="cc" min="5000" max="100000" step="5000"></label>

@@ -1,4 +1,4 @@
-import { DEFAULTS, runPath, runMonteCarlo, slotSchedule, potP, dividendShare } from './engine.js';
+import { DEFAULTS, SCENARIOS, runPath, runMonteCarlo, slotSchedule, potP, dividendShare } from './engine.js';
 
 const fmt = (x) => Math.round(x).toLocaleString('en-US');
 const fmtK = (x) => Math.abs(x) >= 1e6 ? (x/1e6).toFixed(2)+'M' : Math.abs(x)>=1e3 ? Math.round(x/1e3)+'k' : Math.round(x).toString();
@@ -90,8 +90,23 @@ $('cms').addEventListener('input',e=>{P.member_yield_share=+e.target.value;updat
 $('cline').addEventListener('input',e=>{P.bank_line=+e.target.value;updateOutputs();});
 $('cpb').addEventListener('input',e=>{const v=+e.target.value;P.p_lo=Math.max(0.5,v-0.035);P.p_hi=Math.min(0.999,v+0.035);updateOutputs();});
 $('cpaths').addEventListener('input',e=>{P._paths=+e.target.value;updateOutputs();});
-$('resetBtn').addEventListener('click',()=>{P={...DEFAULTS,_paths:800};syncControls();renderFlow();renderSlots();renderMoney(lastMC);});
+$('resetBtn').addEventListener('click',()=>{P={...DEFAULTS,_paths:800};applyScenarioUI('central');syncControls();renderFlow();renderSlots();runSim();});
 $('runBtn').addEventListener('click',runSim);
+
+// scenario toggle (Central / Stressed)
+const scenarioHints = {
+  central:  'Normal conditions — strong discipline (92–97% on-time), no seasonal shock. The headline case.',
+  stressed: 'A bad year — weaker discipline (85–92%) plus two lean-season payment dips. Shows how stress costs the disciplined their upside and when the bank line fires.',
+};
+function applyScenarioUI(scen) {
+  Object.assign(P, SCENARIOS[scen]);
+  document.querySelectorAll('#scenarioSeg .seg-btn').forEach(b=>b.classList.toggle('active', b.dataset.scen===scen));
+  $('scenarioHint').textContent = scenarioHints[scen];
+  $('cpb').value=(P.p_lo+P.p_hi)/2; updateOutputs();
+}
+document.querySelectorAll('#scenarioSeg .seg-btn').forEach(b=>{
+  b.addEventListener('click',()=>{ applyScenarioUI(b.dataset.scen); runSim(); });
+});
 
 let lastMC = null, lastPath = null;
 function runSim() {
@@ -345,10 +360,10 @@ $('compareBtn').addEventListener('click',()=>{
 // INIT
 // ====================================================================
 P._paths = 800;
+applyScenarioUI('central');
 syncControls();
 renderFlow();
 renderSlots();
 renderOptions();
-renderOptions();
-$('buildNote').textContent = 'engine v1 · '+P.N+' members · '+P.num_cycles+' cycles default';
+$('buildNote').textContent = 'engine v2 · open auction · '+P.N+' members · '+P.num_cycles+' cycles · central scenario default';
 runSim();
