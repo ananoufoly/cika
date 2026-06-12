@@ -65,9 +65,16 @@ export const DEFAULTS = {
   invest_liquid_floor: 80000, member_yield_share: 0.85,
   // member protection
   loss_cap_months: 2.0,
-  // discipline
+  // discipline (restriction: miss_streak_out=2 ejects non-contributors after 2 rounds)
   strict_cashrun: true, enable_replacement: true, replacement_delay: 1,
-  probation_q: 2, miss_streak_out: 3, shrink_cap: 2.0,
+  probation_q: 2, miss_streak_out: 2, shrink_cap: 2.0,
+  // LAYER 1 — behavioural heterogeneity (reliable / average / fragile)
+  behavioral: true,
+  mix_reliable: 0.55, mix_average: 0.30, mix_fragile: 0.15,
+  disc_reliable: 1.06, disc_average: 1.00, disc_fragile: 0.82,
+  urg_reliable: 0.80, urg_average: 1.00, urg_fragile: 1.50,
+  // LAYER 2 — macro stress that drives behaviour (correlated)
+  macro_stress: 0.0, macro_pd_sensitivity: 1.2, macro_corr: 0.5,
   // stochastic scenario — DEFAULT is central (normal conditions).
   // The page exposes a Central / Stressed toggle; stressed lowers discipline and
   // adds two lean-season shock windows.
@@ -77,8 +84,8 @@ export const DEFAULTS = {
 
 // Scenario presets used by the page toggle.
 export const SCENARIOS = {
-  central:  { p_lo: 0.92, p_hi: 0.97, shock_windows: [] },
-  stressed: { p_lo: 0.85, p_hi: 0.92, shock_windows: [[5, 7, 0.85], [17, 19, 0.85]] },
+  central:  { p_lo: 0.92, p_hi: 0.97, shock_windows: [], macro_stress: 0.0 },
+  stressed: { p_lo: 0.88, p_hi: 0.94, shock_windows: [[5, 7, 0.88], [17, 19, 0.88]], macro_stress: 0.35 },
 };
 
 // ---- derived helpers ----
@@ -156,15 +163,26 @@ export function runPath(p, seed, pBase) {
   const rng = mulberry32(seed);
   const N = p.N, totalTurns = p.N * p.num_cycles;
 
+  // LAYER 1: assign a discipline type from the population mix
+  function assignType(rng) {
+    if (!p.behavioral) return { mtype: 'average', disc: 1, urg: 1 };
+    const r = rng();
+    if (r < p.mix_reliable) return { mtype: 'reliable', disc: p.disc_reliable, urg: p.urg_reliable };
+    if (r < p.mix_reliable + p.mix_average) return { mtype: 'average', disc: p.disc_average, urg: p.urg_average };
+    return { mtype: 'fragile', disc: p.disc_fragile, urg: p.urg_fragile };
+  }
   // members
   const M = [];
-  for (let i = 1; i <= N; i++) M.push({
-    id: i, out: false, eligDiv: true, eligVest: true, arrears: 0,
-    joinT: 0, paidSince: p.probation_q, wonTurn: null, missed: 0,
-    escrow: [], // [tCredit, principal, lag]
-    contributed: 0, received: 0, dividends: 0, bidPaid: 0,
-    lossTopup: 0, yield: 0, clawback: 0,
-  });
+  for (let i = 1; i <= N; i++) {
+    const ty = assignType(rng);
+    M.push({
+      id: i, out: false, eligDiv: true, eligVest: true, arrears: 0,
+      joinT: 0, paidSince: p.probation_q, wonTurn: null, missed: 0,
+      escrow: [], contributed: 0, received: 0, dividends: 0, bidPaid: 0,
+      lossTopup: 0, yield: 0, clawback: 0,
+      mtype: ty.mtype, disc: ty.disc, urg: ty.urg,
+    });
+  }
   const byId = {}; M.forEach(m => byId[m.id] = m);
   let active = new Set(M.map(m => m.id));
   let nextId = N + 1;
@@ -181,13 +199,17 @@ export function runPath(p, seed, pBase) {
 
   for (let t = 1; t <= totalTurns; t++) {
     const cycle = Math.floor((t - 1) / N) + 1;
+    // LAYER 2: per-turn common macro shock (systemic, shared by all members)
+    let macroCommon = 0;
+    if (p.macro_stress > 0 && p.macro_corr > 0) macroCommon = gaussian(rng) * (0.5 * p.macro_corr);
     if ((t - 1) % N === 0) { slotInCycle = 0; M.forEach(m => m.wonTurn = null); }
 
     // process replacements
     const stillP = [];
     for (const [jt, id] of pending) {
       if (jt <= t && active.size < N) {
-        byId[id] = { id, out: false, eligDiv: true, eligVest: true, arrears: 0, joinT: t, paidSince: 0, wonTurn: null, missed: 0, escrow: [], contributed: 0, received: 0, dividends: 0, bidPaid: 0, lossTopup: 0, yield: 0, clawback: 0 };
+        const ty = assignType(rng);
+        byId[id] = { id, out: false, eligDiv: true, eligVest: true, arrears: 0, joinT: t, paidSince: 0, wonTurn: null, missed: 0, escrow: [], contributed: 0, received: 0, dividends: 0, bidPaid: 0, lossTopup: 0, yield: 0, clawback: 0, mtype: ty.mtype, disc: ty.disc, urg: ty.urg };
         M.push(byId[id]); active.add(id); queue.push(id);
       } else stillP.push([jt, id]);
     }
@@ -226,6 +248,14 @@ export function runPath(p, seed, pBase) {
     for (const id of activeList) {
       let pe = pBase;
       for (const [t0, t1, mult] of p.shock_windows) if (t0 <= t && t <= t1) pe *= mult;
+      // LAYER 1: discipline-type multiplier
+      if (p.behavioral) pe *= byId[id].disc;
+      // LAYER 2: macro stress — correlated logit-space downward shift
+      if (p.macro_stress > 0) {
+        const pc = clip(pe, 1e-4, 1 - 1e-4);
+        const logit = Math.log(pc / (1 - pc)) - p.macro_pd_sensitivity * p.macro_stress + macroCommon;
+        pe = 1 / (1 + Math.exp(-clip(logit, -30, 30)));
+      }
       if (cashrunForceDue && cashrunDueMember === id && cashrunDueTime === t) pe = 0;
       if (rng() < clip(pe, 0, 1)) contributors.push(id);
     }
@@ -273,8 +303,9 @@ export function runPath(p, seed, pBase) {
         const baseFrac = p.rho_monthly * monthsSaved * p.theta_immediate;
         let best = -1;
         for (const id of eligible) {
+          const urg = p.behavioral ? byId[id].urg : 1;   // LAYER 1: fragile members bid harder
           const priv = Math.exp(gaussian(rng) * p.bid_need_sigma);
-          const wtp = baseFrac * priv;
+          const wtp = baseFrac * urg * priv;
           if (wtp > best) { best = wtp; winner = id; }
         }
         discFrac = clip(best, 0, 1 - p.theta_immediate);

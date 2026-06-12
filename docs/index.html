@@ -72,6 +72,11 @@
       <label>Treasury yield (gross annual): <output id="oyld"></output><input type="range" id="cyld" min="0" max="0.20" step="0.01"></label>
       <label>Member share of distribution: <output id="oms"></output><input type="range" id="cms" min="0.5" max="1.0" step="0.05"></label>
       <hr>
+      <label>Macro stress (downturn → correlated defaults): <output id="omacro"></output><input type="range" id="cmacro" min="0" max="0.8" step="0.05"></label>
+      <span class="hint">0 = calm; higher = a downturn that makes many members miss together (the dangerous case for the reserve)</span>
+      <label>Eviction: out after N missed rounds: <output id="omiss"></output><input type="range" id="cmiss" min="1" max="4" step="1"></label>
+      <span class="hint">tighter (2) ejects non-payers faster — cuts reserve drain AND raises the disciplined member's return</span>
+      <hr>
       <label>Bank liquidity line (FCFA): <output id="oline"></output><input type="range" id="cline" min="0" max="1200000" step="100000"></label>
       <label>Payment discipline (avg on-time): <output id="opb"></output><input type="range" id="cpb" min="0.70" max="0.99" step="0.01"></label>
       <hr>

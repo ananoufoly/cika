@@ -161,8 +161,35 @@ class BidROSCAParams:
     enable_replacement: bool = False
     replacement_delay: int = 0
     probation_q: int = 2
-    miss_streak_out: int = 3
+    miss_streak_out: int = 3      # consecutive misses -> out (restriction: set to 2 to tighten)
     shrink_cap: float = 2.0       # arrears shrink cap (x c) applied to payout
+
+    # --- behavioural heterogeneity (LAYER 1) ---
+    # Members are NOT identical. Each draws a discipline type that sets their personal
+    # on-time probability relative to the scenario baseline, and a bid-urgency that
+    # scales how aggressively they bid for early access.
+    behavioral: bool = False
+    # population mix of discipline types (must sum ~1): reliable / average / fragile
+    mix_reliable: float = 0.55
+    mix_average: float = 0.30
+    mix_fragile: float = 0.15
+    # per-type on-time multiplier on the baseline p (reliable pays more reliably)
+    disc_reliable: float = 1.06
+    disc_average: float = 1.00
+    disc_fragile: float = 0.82
+    # per-type bid-urgency multiplier (fragile members value early cash more)
+    urg_reliable: float = 0.80
+    urg_average: float = 1.00
+    urg_fragile: float = 1.50
+
+    # --- macro stress that DRIVES behaviour (LAYER 2) ---
+    # A macro factor in [0,1]: 0 = benign, 1 = severe downturn. It lowers everyone's
+    # on-time probability TOGETHER (correlated), which is the dangerous case for the
+    # reserve — many members miss/default at once. macro_corr sets how much of the
+    # behavioural hit is common (systemic) vs idiosyncratic.
+    macro_stress: float = 0.0
+    macro_pd_sensitivity: float = 1.2   # logit-space downward shift per unit stress
+    macro_corr: float = 0.5             # share of the shock that is common across members
 
     def __post_init__(self):
         assert self.N >= 2
@@ -223,6 +250,10 @@ class MemberState:
     won_turn: Optional[int] = None        # turn at which this member won the pot (this cycle)
     escrow_credits: List[Tuple[int, float]] = field(default_factory=list)
     missed_streak: int = 0
+    # behavioural type (LAYER 1)
+    disc_mult: float = 1.0                 # on-time probability multiplier (discipline type)
+    urg_mult: float = 1.0                  # bid-urgency multiplier (how aggressively they bid)
+    mtype: str = "average"
     # economics tracking
     total_contributed: float = 0.0
     total_received: float = 0.0           # pot payouts received
@@ -293,8 +324,31 @@ class BidROSCASimulator:
 
     # ---- contributors ------------------------------------------------------
 
-    def _p_effective(self, mid, t, p_base, p_by_member, general_shocks, member_shocks) -> float:
+    def _assign_type(self, m: "MemberState", rng) -> None:
+        """LAYER 1: draw a discipline type for a member from the population mix."""
+        pp = self.p
+        r = rng.random()
+        if r < pp.mix_reliable:
+            m.mtype, m.disc_mult, m.urg_mult = "reliable", pp.disc_reliable, pp.urg_reliable
+        elif r < pp.mix_reliable + pp.mix_average:
+            m.mtype, m.disc_mult, m.urg_mult = "average", pp.disc_average, pp.urg_average
+        else:
+            m.mtype, m.disc_mult, m.urg_mult = "fragile", pp.disc_fragile, pp.urg_fragile
+
+    def _p_effective(self, mid, t, p_base, p_by_member, general_shocks, member_shocks,
+                     members=None, macro_common=0.0) -> float:
         p = float(p_by_member.get(mid, p_base)) if p_by_member else float(p_base)
+        # LAYER 1+2: behavioural type and macro stress shift on-time probability in logit space
+        if self.p.behavioral and members is not None and mid in members:
+            m = members[mid]
+            # type discipline multiplier (applied to baseline p)
+            p *= m.disc_mult
+        if self.p.macro_stress > 0.0:
+            # correlated downward shift: common component + remainder absorbed via disc
+            shift = self.p.macro_pd_sensitivity * self.p.macro_stress
+            pc = float(np.clip(p, 1e-4, 1 - 1e-4))
+            logit = np.log(pc / (1 - pc)) - shift + macro_common
+            p = 1.0 / (1.0 + np.exp(-np.clip(logit, -30, 30)))
         if general_shocks:
             for t0, t1, mult in general_shocks:
                 if t0 <= t <= t1:
@@ -307,7 +361,8 @@ class BidROSCASimulator:
 
     def _contributors(self, rng, active_list, t, payment_mode, A,
                       p_base, p_by_member, general_shocks, member_shocks,
-                      cashrun_due_member, cashrun_due_time, cashrun_force_due) -> List[int]:
+                      cashrun_due_member, cashrun_due_time, cashrun_force_due,
+                      members=None, macro_common=0.0) -> List[int]:
         if payment_mode == "deterministic":
             return active_list[: max(0, min(A, len(active_list)))]
         if payment_mode == "mc_fixedA":
@@ -316,7 +371,8 @@ class BidROSCASimulator:
         # mc_probpay
         contributors = []
         for mid in active_list:
-            p_eff = self._p_effective(mid, t, p_base, p_by_member, general_shocks, member_shocks)
+            p_eff = self._p_effective(mid, t, p_base, p_by_member, general_shocks, member_shocks,
+                                      members=members, macro_common=macro_common)
             if cashrun_force_due and cashrun_due_member == mid and cashrun_due_time == t:
                 p_eff = 0.0
             if rng.random() < p_eff:
@@ -355,9 +411,11 @@ class BidROSCASimulator:
             best_mid, best_bid = None, -1.0
             for mid in eligible:
                 need = float(bid_need.get(mid, 1.0)) if bid_need else 1.0
+                # behavioural urgency (LAYER 1): fragile members value early cash more
+                urg = members[mid].urg_mult if (self.p.behavioral and mid in members) else 1.0
                 # private need multiplier ~ lognormal around 1.0
                 priv = float(np.exp(rng.normal(0.0, self.p.bid_need_sigma)))
-                wtp = base_frac * need * priv
+                wtp = base_frac * need * urg * priv
                 if wtp > best_bid:
                     best_bid, best_mid = wtp, mid
             # winner pays their willingness-to-pay (clipped); price emerges from demand
@@ -498,6 +556,10 @@ class BidROSCASimulator:
                              if cashrun_plan else None)
 
         members = self._init_members()
+        # LAYER 1: assign behavioural types from the population mix
+        if p.behavioral:
+            for m in members.values():
+                self._assign_type(m, rng)
         active_set: Set[int] = set(members.keys())
         next_member_id = p.N + 1
         pending_replacements: List[Tuple[int, int]] = []
@@ -526,6 +588,10 @@ class BidROSCASimulator:
 
         for t in range(1, total_turns + 1):
             cycle_t = (t - 1) // p.N + 1
+            # LAYER 2: per-turn common macro shock (systemic component, shared by all members)
+            macro_common = 0.0
+            if p.macro_stress > 0.0 and p.macro_corr > 0.0:
+                macro_common = float(rng.normal(0.0, 0.5 * p.macro_corr))
             if (t - 1) % p.N == 0:
                 slot_in_cycle = 0
                 # new cycle: members may win again
@@ -596,7 +662,8 @@ class BidROSCASimulator:
                 contributors = self._contributors(
                     rng, active_list, t, payment_mode, A,
                     p_base, p_by_member, general_shocks, member_shocks,
-                    cashrun_due_member, cashrun_due_time, cashrun_force_due)
+                    cashrun_due_member, cashrun_due_time, cashrun_force_due,
+                    members=members, macro_common=macro_common)
             contrib_set = set(contributors)
 
             # --- strict cashrun check on previous winner ---

@@ -70,6 +70,7 @@ function syncControls() {
   $('cN').value=P.N; $('cc').value=P.c; $('ccyc').value=P.num_cycles;
   $('crho').value=P.rho_monthly;
   $('cyld').value=P.invest_yield_annual; $('cms').value=P.member_yield_share;
+  $('cmacro').value=P.macro_stress; $('cmiss').value=P.miss_streak_out;
   $('cline').value=P.bank_line; $('cpb').value=(P.p_lo+P.p_hi)/2; $('cpaths').value=P._paths||800;
   updateOutputs();
 }
@@ -78,6 +79,8 @@ function updateOutputs() {
   $('ocyc').textContent=P.num_cycles+' ('+(P.N*P.num_cycles)+' mo)';
   $('orho').textContent=(P.rho_monthly*100).toFixed(1)+'%/mo';
   $('oyld').textContent=pct(P.invest_yield_annual); $('oms').textContent=pct(P.member_yield_share);
+  $('omacro').textContent=P.macro_stress===0?'off':P.macro_stress.toFixed(2);
+  $('omiss').textContent=P.miss_streak_out+' miss'+(P.miss_streak_out>1?'es':'');
   $('oline').textContent=fmt(P.bank_line); $('opb').textContent=pct((P.p_lo+P.p_hi)/2);
   $('opaths').textContent=P._paths||800;
 }
@@ -87,6 +90,8 @@ $('ccyc').addEventListener('input',e=>{P.num_cycles=+e.target.value;updateOutput
 $('crho').addEventListener('input',e=>{P.rho_monthly=+e.target.value;updateOutputs();renderFlow();renderSlots();});
 $('cyld').addEventListener('input',e=>{P.invest_yield_annual=+e.target.value;updateOutputs();});
 $('cms').addEventListener('input',e=>{P.member_yield_share=+e.target.value;updateOutputs();});
+$('cmacro').addEventListener('input',e=>{P.macro_stress=+e.target.value;updateOutputs();});
+$('cmiss').addEventListener('input',e=>{P.miss_streak_out=+e.target.value;updateOutputs();});
 $('cline').addEventListener('input',e=>{P.bank_line=+e.target.value;updateOutputs();});
 $('cpb').addEventListener('input',e=>{const v=+e.target.value;P.p_lo=Math.max(0.5,v-0.035);P.p_hi=Math.min(0.999,v+0.035);updateOutputs();});
 $('cpaths').addEventListener('input',e=>{P._paths=+e.target.value;updateOutputs();});
@@ -102,7 +107,7 @@ function applyScenarioUI(scen) {
   Object.assign(P, SCENARIOS[scen]);
   document.querySelectorAll('#scenarioSeg .seg-btn').forEach(b=>b.classList.toggle('active', b.dataset.scen===scen));
   $('scenarioHint').textContent = scenarioHints[scen];
-  $('cpb').value=(P.p_lo+P.p_hi)/2; updateOutputs();
+  $('cpb').value=(P.p_lo+P.p_hi)/2; $('cmacro').value=P.macro_stress; updateOutputs();
 }
 document.querySelectorAll('#scenarioSeg .seg-btn').forEach(b=>{
   b.addEventListener('click',()=>{ applyScenarioUI(b.dataset.scen); runSim(); });
