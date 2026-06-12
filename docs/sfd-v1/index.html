@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tontine structurée avec SFD dépositaire — Simulateur</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="kicker">Simulateur de viabilité · modèle technique</div>
+    <h1 class="num">Tontine rotative structurée avec SFD dépositaire</h1>
+    <p class="sub">Un modèle de tontine à enchères où la <b>réserve endogène</b> (alimentée par les enchères et les confiscations) et une <b>cascade de garanties à 4 niveaux</b> couvrent le risque de solvabilité. Tous les chiffres sont calculés en direct par le moteur de simulation dans votre navigateur.</p>
+    <div class="pills">
+      <span class="pill">Facteur systémique + secteurs (Vasicek)</span>
+      <span class="pill">Cascade 4 niveaux</span>
+      <span class="pill">Perte SFD bornée</span>
+      <span class="pill">Monte Carlo en direct</span>
+    </div>
+    <p class="disclaimer">Outil interne d'aide à la décision — ne constitue pas une offre. Nommage générique : Opérateur (plateforme), SFD (institution dépositaire), Membre, Pool.</p>
+  </div>
+</header>
+
+<nav class="tabs wrap">
+  <a href="#mecanisme" class="tab active">1 · Mécanisme</a>
+  <a href="#simulateur" class="tab">2 · Simulateur</a>
+  <a href="#cascade" class="tab">3 · Cascade</a>
+  <a href="#pnl" class="tab">4 · P&amp;L Opérateur &amp; SFD</a>
+</nav>
+
+<!-- 1 · MÉCANISME -->
+<section id="mecanisme" class="wrap">
+  <h2>1 · Le mécanisme, tour par tour</h2>
+  <p class="lead">Un pool de M membres cotise c chaque mois. Chaque tour, un bénéficiaire reçoit la moitié du pool immédiatement ; l'autre moitié est différée à la fin du cycle. Une enchère permet d'avancer son différé — le prix émerge de la valeur-temps.</p>
+  <div class="etapes" id="etapes"></div>
+  <div class="props">
+    <div class="prop"><b>Le bid finance la solvabilité.</b> Chaque enchère se décompose en commission ferme (revenu Opérateur) et consignation (détenue par la SFD, restituée au membre discipliné). La consignation et les confiscations alimentent la réserve.</div>
+    <div class="prop"><b>La discipline est récompensée.</b> Quitter ou faire défaut confisque le différé et la consignation, qui financent le bonus inter-cycle des membres restés disciplinés sur 2 cycles.</div>
+    <div class="prop"><b>La perte SFD est bornée.</b> La cascade garantit le pot complet des disciplinés ; la ligne contingente SFD est plafonnée — la perte maximale du partenaire est connue d'avance.</div>
+  </div>
+</section>
+
+<!-- 2 · SIMULATEUR -->
+<section id="simulateur" class="wrap alt">
+  <h2>2 · Simulateur Monte Carlo</h2>
+  <p class="lead">Choisissez un scénario et ajustez les paramètres. Le moteur lance N simulations dans votre navigateur (moyennes + percentiles 5/95).</p>
+  <div class="sim-grid">
+    <div class="controls card">
+      <h3>Scénario</h3>
+      <div class="seg" id="scenarioSeg">
+        <button class="seg-btn active" data-scen="nominal">Nominal</button>
+        <button class="seg-btn" data-scen="comportemental">Comport.</button>
+        <button class="seg-btn" data-scen="macro">Macro</button>
+        <button class="seg-btn" data-scen="combine">Combiné</button>
+        <button class="seg-btn" data-scen="bids_faibles">Bids faibles</button>
+      </div>
+      <span class="hint" id="scenarioHint"></span>
+      <hr>
+      <h3>Structure</h3>
+      <label>Pools (N) : <output id="o_npools"></output><input type="range" id="c_npools" min="10" max="100" step="10"></label>
+      <label>Membres / pool (M) : <output id="o_m"></output><input type="range" id="c_m" min="6" max="20" step="1"></label>
+      <label>Contribution c (XOF) : <output id="o_c"></output><input type="range" id="c_c" min="5000" max="25000" step="1000"></label>
+      <label>Cycles : <output id="o_cyc"></output><input type="range" id="c_cyc" min="1" max="4" step="1"></label>
+      <hr>
+      <h3>Mécanisme</h3>
+      <label>Commission ferme α : <output id="o_alpha"></output><input type="range" id="c_alpha" min="0.2" max="0.8" step="0.05"></label>
+      <label>Coût du temps ρ (mensuel) : <output id="o_rho"></output><input type="range" id="c_rho" min="0.005" max="0.05" step="0.005"></label>
+      <label>Contrainte K (max même secteur/pool) : <output id="o_k"></output><input type="range" id="c_k" min="1" max="6" step="1"></label>
+      <hr>
+      <label>Runs Monte Carlo : <output id="o_runs"></output><input type="range" id="c_runs" min="20" max="300" step="20"></label>
+      <button id="runBtn" class="btn big">▶ Lancer la simulation</button>
+      <button id="resetBtn" class="btn ghost">Réinitialiser</button>
+    </div>
+    <div class="results">
+      <div class="kpi-grid" id="kpiGrid"></div>
+      <div class="card chart-card">
+        <h3>Distribution des pertes SFD <span class="hint">milliers XOF · la perte est bornée par la ligne contingente</span></h3>
+        <canvas id="pertesCanvas" width="640" height="220"></canvas>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 3 · CASCADE -->
+<section id="cascade" class="wrap">
+  <h2>3 · Cascade de garanties</h2>
+  <p class="lead">Quand un défaut crée un écart de financement, la couverture suit un ordre strict. En conjoncture normale la cascade s'arrête bas ; sous stress systémique elle monte vers la ligne SFD.</p>
+  <div class="cascade-viz" id="cascadeViz"></div>
+  <div class="card chart-card">
+    <h3>Activation par niveau <span class="hint">scénario courant · nb d'activations</span></h3>
+    <canvas id="cascadeCanvas" width="640" height="200"></canvas>
+  </div>
+</section>
+
+<!-- 4 · P&L -->
+<section id="pnl" class="wrap alt">
+  <h2>4 · P&amp;L Opérateur &amp; SFD</h2>
+  <p class="lead">Deux comptes de résultat, pour les deux partenaires. Reflètent les paramètres et le scénario courants.</p>
+  <div class="pnl-grid" id="pnlGrid"></div>
+  <div class="card chart-card">
+    <h3>P&amp;L Opérateur vs nombre de pools <span class="hint">économie unitaire : la marge par pool est positive — rentable dès le 1ᵉʳ pool (hors frais de structure)</span></h3>
+    <canvas id="breakevenCanvas" width="900" height="240"></canvas>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p>Simulateur tontine-SFD · calcul 100% côté client · moteur fidèle au modèle Python (Monte Carlo 1000 runs de référence) · <a href="bid-rosca/">voir le modèle précédent (bid-ROSCA)</a></p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
